@@ -14,7 +14,8 @@
 <script>
 /* A Day in Light — one point of light paints a woman's day in 3D space.
    Controls (no on-screen UI by design): click/space = pause, ←/→ = seek, R = restart, F = fullscreen.
-   URL: ?t=<seconds> start time, ?still=1 render one frame and stop. */
+   URL: ?t=<seconds> start time, ?still=1 render one frame and stop,
+   ?w=&h= force the render resolution (used for offline video export via __light.step). */
 (() => {
 'use strict';
 const TAU = Math.PI * 2, RAD = Math.PI / 180;
@@ -547,11 +548,13 @@ const mk = () => { const c = document.createElement('canvas'); return [c, c.getC
 const [sc, g] = mk(), [rc, rg] = mk(), [b1, g1] = mk(), [b2, g2] = mk();
 let W = 0, H = 0, foc = 1, asp = 1, qual = 1, slow = 0;
 const hasFilter = typeof g.filter === 'string';
+const FW = +new URLSearchParams(location.search).get('w') || 0, FH = +new URLSearchParams(location.search).get('h') || 0;
 function resize() {
   let d = Math.min(window.devicePixelRatio || 1, 1.5);
   const px = innerWidth * innerHeight * d * d; if (px > 2.4e6) d *= Math.sqrt(2.4e6 / px);
   d *= qual;
   W = Math.max(2, Math.round(innerWidth * d)); H = Math.max(2, Math.round(innerHeight * d));
+  if (FW && FH) { W = FW; H = FH; }
   cv.width = sc.width = W; cv.height = sc.height = H; rc.width = W >> 1; rc.height = H >> 1;
   b1.width = W >> 2; b1.height = H >> 2; b2.width = W >> 4; b2.height = H >> 4;
   asp = W / H; foc = 1.25 * H * Math.min(1, asp / 1.25);
@@ -698,7 +701,7 @@ function frame(now) {
   if (!still) requestAnimationFrame(frame);
 }
 const seek = t => { T = Math.max(0, Math.min(TOTAL - .01, t)); hard = true; render(T); present(); };
-window.__light = { seek, get total() { return TOTAL; }, scenes: T0, strokes: strokes.length };
+window.__light = { seek, step(t) { T = t; render(T); present(); }, get total() { return TOTAL; }, scenes: T0, strokes: strokes.length };
 addEventListener('keydown', e => {
   if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
   else if (e.code === 'ArrowRight') seek(T + 5); else if (e.code === 'ArrowLeft') seek(T - 5);
