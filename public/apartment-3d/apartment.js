@@ -762,7 +762,8 @@
   }
   var planBtn = document.getElementById('planBtn'), roomLabel = document.getElementById('room'), hint = document.getElementById('hint');
   function setPlan(on) {
-    plan = on; high.visible = !on; markerG.visible = on; sky.visible = !on;
+    plan = on; high.visible = !on; markerG.visible = on; routeG.visible = on; sky.visible = !on;
+    if (on && tour.on) { tour.on = false; tourUI(); }
     planBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
     planBtn.textContent = on ? 'Walk through' : 'Plan view';
     hint.textContent = on ? 'Ceiling lifted. Tap any clear floor to stand there.'
@@ -796,6 +797,7 @@
   });
   canvas.addEventListener('pointermove', function (e) {
     if (!drag || drag.id !== e.pointerId || plan) return;
+    if (tour.on) { if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 6) return; tourPause(); }
     var k = (e.pointerType === 'touch' ? 0.0052 : 0.0034);
     yaw -= (e.clientX - drag.x) * k; pitch = Math.max(-1.2, Math.min(1.2, pitch - (e.clientY - drag.y) * k));
     drag.x = e.clientX; drag.y = e.clientY; dirty = true;
@@ -830,22 +832,115 @@
   pad.addEventListener('pointerup', padEnd); pad.addEventListener('pointercancel', padEnd);
 
   Array.prototype.forEach.call(document.querySelectorAll('[data-room]'), function (b) {
-    b.addEventListener('click', function () { go(b.getAttribute('data-room')); });
+    b.addEventListener('click', function () { tourPause(); go(b.getAttribute('data-room')); });
   });
   planBtn.addEventListener('click', function () { setPlan(!plan); });
   var notes = document.getElementById('notes');
   document.getElementById('notesBtn').addEventListener('click', function () { notes.hidden = !notes.hidden; });
   document.getElementById('notesClose').addEventListener('click', function () { notes.hidden = true; });
 
+
+  /* ───────────────────────── guided camera walkthrough ─────────────────── */
+  // Seven key views and the path between them, in plan pixels, following the supplied route diagram.
+  var STOPS = [
+    { n: 'Entry', p: [107, 471], look: [300, 471] },
+    { n: 'Kitchen', p: [205, 300], look: [330, 265] },
+    { n: 'Living', p: [600, 300], look: [800, 330] },
+    { n: 'Bedroom door', p: [465, 570], look: [700, 740] },
+    { n: 'Bedroom', p: [540, 770], look: [760, 740] },
+    { n: 'Closet side', p: [668, 905], look: [870, 800] },
+    { n: 'Bath', p: [285, 845], look: [345, 926] }
+  ];
+  var VIA = [
+    [[185, 400]],
+    [[212, 395], [300, 425], [480, 415], [555, 360]],
+    [[540, 400], [445, 440], [375, 470], [362, 520], [372, 565]],
+    [[512, 625], [528, 710]],
+    [[610, 838]],
+    [[612, 840], [540, 765], [522, 650], [465, 572], [372, 575], [346, 640], [346, 725], [325, 800]]
+  ];
+  var LEGS = VIA.map(function (via, i) {
+    var pts = [STOPS[i].p].concat(via, [STOPS[i + 1].p]).map(function (q) { return new THREE.Vector3(wx(q[0]), 0, wz(q[1])); });
+    var c = new THREE.CatmullRomCurve3(pts, false, 'centripetal'); c.arcLengthDivisions = 400;
+    return { curve: c, len: c.getLength() };
+  });
+  var tour = { on: false, leg: 0, s: 0, hold: 0, phase: 'hold', started: false };
+  var routeG = new THREE.Group(); routeG.visible = false; scene.add(routeG);
+  (function drawRoute() {
+    var rm = new THREE.MeshBasicMaterial({ color: '#d0392b', depthTest: false, toneMapped: false });
+    LEGS.forEach(function (l) {
+      var tube = new THREE.Mesh(new THREE.TubeGeometry(l.curve, 90, 0.028, 5, false), rm);
+      tube.position.y = 2.9; tube.renderOrder = 5; routeG.add(tube);
+    });
+    STOPS.forEach(function (st, i) {
+      var c = cv(96, 96), g = c.getContext('2d');
+      g.fillStyle = '#2e8b2e'; g.beginPath(); g.arc(48, 48, 42, 0, 6.3); g.fill(); g.lineWidth = 6; g.strokeStyle = '#fff'; g.stroke();
+      g.fillStyle = '#fff'; g.font = '600 54px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(i + 1), 48, 52);
+      var sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, toneMapped: false }));
+      sp.scale.set(0.42, 0.42, 1); sp.position.set(wx(st.p[0]), 3, wz(st.p[1])); sp.renderOrder = 6; routeG.add(sp);
+      var a = new THREE.Vector3(wx(st.p[0]), 2.95, wz(st.p[1])), b = new THREE.Vector3(wx(st.look[0]), 2.95, wz(st.look[1])).sub(a).setLength(0.55).add(a);
+      var arrow = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), new THREE.LineBasicMaterial({ color: '#2456d6', depthTest: false, toneMapped: false }));
+      arrow.renderOrder = 5; routeG.add(arrow);
+    });
+  })();
+  function lookYaw(st) { return Math.atan2(-(wx(st.look[0]) - wx(st.p[0])), -(wz(st.look[1]) - wz(st.p[1]))); }
+  function turnTo(target, k) {
+    var d = target - yaw; d = Math.atan2(Math.sin(d), Math.cos(d)); yaw += d * k;
+  }
+  var tourBtn = document.getElementById('tourBtn');
+  function tourUI() {
+    tourBtn.textContent = tour.on ? 'Pause tour' : (tour.started ? 'Resume tour' : 'Play tour');
+    tourBtn.setAttribute('aria-pressed', tour.on ? 'true' : 'false');
+    if (tour.on) {
+      var i = tour.phase === 'hold' ? tour.leg : tour.leg + 1;
+      hint.textContent = (tour.phase === 'hold' ? 'Stop ' : 'Heading to stop ') + (i + 1) + ' of ' + STOPS.length + ' · ' + STOPS[i].n + '. Drag or press a key to take over.';
+    }
+  }
+  function tourStop(i) {           // place the camera on a key view
+    var st = STOPS[i]; pos.x = wx(st.p[0]); pos.z = wz(st.p[1]); yaw = lookYaw(st); pitch = -0.05; dirty = true;
+  }
+  function tourPlay() {
+    if (plan) setPlan(false);
+    if (!tour.started || tour.leg >= LEGS.length) { tour.leg = 0; tour.s = 0; tour.phase = 'hold'; tour.hold = 2.2; tour.started = true; tourStop(0); }
+    else if (tour.phase === 'hold') tourStop(tour.leg);
+    else { var q = LEGS[tour.leg].curve.getPointAt(tour.s / LEGS[tour.leg].len); pos.x = q.x; pos.z = q.z; }
+    tour.on = true; tourUI(); dirty = true;
+  }
+  function tourPause() { if (!tour.on) return; tour.on = false; setPlan(plan); tourUI(); }
+  function tourStep(dt) {
+    var ease = 1 - Math.exp(-dt * 2.6);
+    pitch += (-0.05 - pitch) * ease;
+    if (tour.phase === 'hold') {
+      turnTo(lookYaw(STOPS[tour.leg]), ease);
+      tour.hold -= dt;
+      if (tour.hold <= 0) {
+        if (tour.leg >= LEGS.length) { tour.on = false; tour.started = false; setPlan(false); tourUI(); hint.textContent = 'Tour finished. Walk around freely, or play it again.'; }
+        else { tour.phase = 'move'; tour.s = 0; tourUI(); }
+      }
+    } else {
+      var L = LEGS[tour.leg], rem = L.len - tour.s;
+      var v = 0.95 * Math.min(1, (tour.s + 0.12) / 0.7, (rem + 0.12) / 0.7);
+      tour.s = Math.min(L.len, tour.s + v * dt);
+      var q = L.curve.getPointAt(tour.s / L.len); pos.x = q.x; pos.z = q.z;
+      if (rem < 1.0) turnTo(lookYaw(STOPS[tour.leg + 1]), ease);
+      else { var a = L.curve.getPointAt(Math.min(1, (tour.s + 0.7) / L.len)); turnTo(Math.atan2(-(a.x - q.x), -(a.z - q.z)), ease); }
+      if (tour.s >= L.len) { tour.leg++; tour.phase = 'hold'; tour.hold = 2.8; tourUI(); }
+    }
+    dirty = true;
+  }
+  tourBtn.addEventListener('click', function () { if (tour.on) tourPause(); else tourPlay(); });
+
   /* ─────────────────────────────── main loop ───────────────────────────── */
   var last = performance.now(), lastRoom = '';
   function frame(now) {
     requestAnimationFrame(frame);
-    var dt = Math.min(0.05, (now - last) / 1000); last = now;
+    var last0 = last, dt = Math.min(0.05, (now - last) / 1000); last = now;
     var f = (keys.KeyW || keys.ArrowUp ? 1 : 0) - (keys.KeyS || keys.ArrowDown ? 1 : 0) - stick.y;
     var r = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) + stick.x;
     var turn = (keys.ArrowLeft || keys.KeyQ ? 1 : 0) - (keys.ArrowRight || keys.KeyE ? 1 : 0);
-    if (!plan && (f || r || turn)) {
+    if (tour.on && (f || r || turn)) tourPause();
+    if (tour.on) tourStep(Math.min(0.1, (now - last0) / 1000));
+    else if (!plan && (f || r || turn)) {
       yaw += turn * 1.7 * dt;
       var l = Math.hypot(f, r); if (l > 1) { f /= l; r /= l; }
       var sp = (keys.ShiftLeft || keys.ShiftRight ? 3 : 1.5) * dt, sy = Math.sin(yaw), cy = Math.cos(yaw);
@@ -876,6 +971,12 @@
     pose: function (px, py, tx, ty, p) { pos.x = wx(px); pos.z = wz(py); yaw = Math.atan2(-(wx(tx) - pos.x), -(wz(ty) - pos.z)); pitch = p || 0; setPlan(false); },
     planBounds: function () { return { left: ortho.left, right: ortho.right, top: ortho.top, bottom: ortho.bottom }; },
     walk: function (dx, dz) { pos.x += dx; pos.z += dz; resolve(pos); dirty = true; return { x: pos.x / S + CX, y: pos.z / S + CY }; },
-    render: function () { dirty = true; }
+    render: function () { dirty = true; },
+    tourStop: function (i) { setPlan(false); tourStop(i); }, tourPlay: tourPlay, tour: tour,
+    tourClearance: function () {            // samples of the path that come too close to anything solid
+      var bad = [];
+      LEGS.forEach(function (l, i) { l.curve.getSpacedPoints(200).forEach(function (q) { if (blocked(q.x, q.z)) bad.push([i + 1, Math.round(q.x / S + CX), Math.round(q.z / S + CY)]); }); });
+      return bad;
+    }
   };
 })();
