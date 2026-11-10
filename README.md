@@ -27,3 +27,7 @@ npm start
 ## Data (Aug 2025)
 - Prefilled city minimum wages: Berkeley $19.18, San Francisco $19.18, Los Angeles (City) $17.87, Emeryville $19.90, etc.
 - Prop 22 per‑mile default: $0.36 (editable in UI).
+
+## A Day in Light
+`public/a-day-in-light.html` is a standalone, dependency-free canvas piece (served at `/a-day-in-light.html`): a single point of light paints one day in a woman's life as luminous 3D line art, from waking to sleep (~3 min, loops).
+Controls: click/space pause, ←/→ seek, R restart, F fullscreen. `?t=<seconds>` starts at a given time.

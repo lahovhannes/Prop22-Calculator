@@ -1,0 +1,713 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>A Day in Light</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden}
+  canvas{display:block;width:100vw;height:100vh;background:#000;cursor:none;touch-action:manipulation}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+/* A Day in Light — one point of light paints a woman's day in 3D space.
+   Controls (no on-screen UI by design): click/space = pause, ←/→ = seek, R = restart, F = fullscreen.
+   URL: ?t=<seconds> start time, ?still=1 render one frame and stop. */
+(() => {
+'use strict';
+const TAU = Math.PI * 2, RAD = Math.PI / 180;
+const dn = a => [Math.sin(a * RAD), -Math.cos(a * RAD)];      // angle from "down", + toward forward
+const up = a => [Math.sin(a * RAD), Math.cos(a * RAD)];       // angle from "up", + toward forward
+const sm = x => { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); };
+const lerp = (a, b, t) => a + (b - a) * t;
+let seed = 7;
+const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+/* ---------- curve helpers (work on arrays of N-dim points) ---------- */
+function cr(pts, seg = 7) {
+  if (pts.length < 3) return pts;
+  const out = [], n = pts.length, D = pts[0].length;
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(n - 1, i + 2)];
+    for (let j = 0; j < seg; j++) {
+      const t = j / seg, t2 = t * t, t3 = t2 * t, q = [];
+      for (let d = 0; d < D; d++)
+        q.push(.5 * ((2 * p1[d]) + (-p0[d] + p2[d]) * t + (2 * p0[d] - 5 * p1[d] + 4 * p2[d] - p3[d]) * t2 + (-p0[d] + 3 * p1[d] - 3 * p2[d] + p3[d]) * t3));
+      out.push(q);
+    }
+  }
+  out.push(pts[n - 1]);
+  return out;
+}
+function resample(pts, step) {
+  const out = [pts[0]]; let carry = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], L = Math.hypot(dx, dy, dz);
+    if (L < 1e-6) continue;
+    let d = step - carry;
+    while (d <= L) { const t = d / L; out.push([a[0] + dx * t, a[1] + dy * t, a[2] + dz * t]); d += step; }
+    carry = L - (d - step);
+  }
+  const l = pts[pts.length - 1], o = out[out.length - 1];
+  if (Math.hypot(l[0] - o[0], l[1] - o[1], l[2] - o[2]) > step * .3 || out.length < 2) out.push(l);
+  return out;
+}
+
+/* ---------- stroke store ---------- */
+const strokes = [];
+const FIG = [255, 236, 218];
+const NSC = 10;
+const HW = [2.6, 2, 2.2, 2.2, 2.4, 5.2, 2.4, 6.6, 2.2, 2.6];
+const DUR = [19, 15, 15, 16, 16, 21, 15, 23, 15, 22];
+const COL = [[255, 186, 112], [110, 205, 255], [255, 166, 84], [255, 128, 172], [186, 148, 255],
+             [112, 250, 214], [255, 108, 200], [104, 146, 255], [168, 146, 255], [92, 124, 235]];
+const CAMS = [ // local target x,y,z, distance, yaw offset (deg), follow
+  [.2, .95, 0, 6.3, 12, .25], [0, 1.15, 0, 5.6, -14, .2], [0, 1.05, 0, 5.2, 16, .2], [.3, 1.05, 0, 4.9, -36, .15],
+  [-.1, 1.05, 0, 6, 10, .25], [0, 1.35, 0, 8.8, -8, .8], [.2, 1.05, 0, 5.8, 18, .25], [0, 2.3, 0, 11.5, 8, .75],
+  [.3, 1.1, 0, 5.2, -30, .15], [0, .95, 0, 6.4, -10, .2]];
+const SCN = [];
+{ let x = 0; for (let i = 0; i < NSC; i++) { if (i) x += HW[i - 1] + HW[i] + 2.5; SCN.push({ i, ox: x, oz: 2.2 * Math.sin(i * 1.3), yaw: .22 * Math.sin(i * 2.1 + .5), col: COL[i] }); } }
+let SC = SCN[0];
+const toWorld = (sc, p) => { const c = Math.cos(sc.yaw), s = Math.sin(sc.yaw); return [sc.ox + p[0] * c + p[2] * s, p[1], sc.oz - p[0] * s + p[2] * c]; };
+
+function S(pts, o = {}) {
+  let p = o.s ? cr(pts) : pts;
+  p = resample(p.map(q => toWorld(SC, q)), o.step || .035);
+  const n = p.length, f = new Float32Array(n * 3);
+  let len = 0;
+  for (let i = 0; i < n; i++) { f[i * 3] = p[i][0]; f[i * 3 + 1] = p[i][1]; f[i * 3 + 2] = p[i][2]; if (i) len += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1], p[i][2] - p[i - 1][2]); }
+  const col = o.col || SC.col;
+  strokes.push({ p: f, n, len, col: `rgb(${col[0]},${col[1]},${col[2]})`, rgb: col,
+    core: `rgb(${col.map(v => Math.round(lerp(v, 255, .6))).join(',')})`,
+    a: o.a ?? 1, w: o.w || .9, grp: o.grp || 'props', fx: o.fx, ph: rnd(), sc: SC.i, life: o.life, fade: o.fade, speed: o.speed || 1, dur: o.dur });
+}
+const L = (pts, o) => S(pts, o);
+const C = (pts, o) => S(pts, Object.assign({ s: 1 }, o));
+const EXZ = (cx, y, cz, rx, rz, o, n = 28) => { const p = []; for (let i = 0; i <= n; i++) { const t = i / n * TAU; p.push([cx + rx * Math.cos(t), y, cz + rz * Math.sin(t)]); } S(p, o); };
+const EXY = (cx, cy, z, rx, ry, o, a0 = 0, a1 = 360, n = 28) => { const p = []; for (let i = 0; i <= n; i++) { const t = lerp(a0, a1, i / n) * RAD; p.push([cx + rx * Math.cos(t), cy + ry * Math.sin(t), z]); } S(p, o); };
+const RXY = (x0, y0, x1, y1, z, o) => S([[x0, y0, z], [x1, y0, z], [x1, y1, z], [x0, y1, z], [x0, y0, z]], o);
+const star = (x, y, z, s, o) => S([[x - s, y, z], [x + s, y, z], [x, y, z], [x, y + s, z], [x, y - s, z]], Object.assign({ fx: 'tw' }, o));
+function crescent(cx, cy, z, r, o) {
+  const p = []; for (let a = 60; a <= 300; a += 15) p.push([cx + r * Math.cos(a * RAD), cy + r * Math.sin(a * RAD), z]);
+  p.push([cx - .12 * r, cy - .5 * r, z], [cx - .3 * r, cy, z], [cx - .12 * r, cy + .5 * r, z], p[0]);
+  C(p, o);
+}
+function helix(cx, cz, o) {
+  const p = []; for (let i = 0; i <= 90; i++) { const u = i / 90, a = u * TAU * 3.6, r = lerp(.62, .3, u) * (1 + .15 * Math.sin(u * 9)); p.push([cx + r * Math.cos(a), .04 + u * 2.05, cz + r * Math.sin(a)]); }
+  S(p, Object.assign({ life: .3, fade: 3, w: .8 }, o));
+}
+
+/* ---------- the woman: a parametric 2D figure (x = forward, y = up) ---------- */
+const LW = [[0, .078], [.12, .076], [.26, .064], [.44, .047], [.56, .05], [.7, .038], [.86, .024]];
+const AW = [[0, .042], [.14, .04], [.28, .031], [.38, .033], [.53, .019]];
+const wAt = (T, d) => { for (let i = 1; i < T.length; i++) if (d <= T[i][0]) { const a = T[i - 1], b = T[i]; return lerp(a[1], b[1], (d - a[0]) / (b[0] - a[0])); } return T[T.length - 1][1]; };
+function chain(o, a1, a2, l1, l2) {
+  const d1 = dn(a1), d2 = dn(a2), q1 = dn(a1 + 90), q2 = dn(a2 + 90);
+  const k = [o[0] + l1 * d1[0], o[1] + l1 * d1[1]], e = [k[0] + l2 * d2[0], k[1] + l2 * d2[1]];
+  return { o, k, e, d1, d2, q1, q2, a1, a2, l1, l2,
+    pt(d, off) { return d <= l1 ? [o[0] + d * d1[0] + off * q1[0], o[1] + d * d1[1] + off * q1[1]] : [k[0] + (d - l1) * d2[0] + off * q2[0], k[1] + (d - l1) * d2[1] + off * q2[1]]; } };
+}
+function figure(Q) {
+  const P = Object.assign({ y: .9, g: 1, rot: 0, sp: 0, sp2: 0, nk: 0, aA: [8, 10], aB: [-10, 10], lA: [4, -3, 0], lB: [-4, -3, 0], outfit: 'slip', hat: 0, heels: 0, hair: 'long' }, Q);
+  const r = P.rot, hf = P.heels ? -32 : 0;
+  function build(y) {
+    const u1 = up(r + P.sp), n1 = [u1[1], -u1[0]], u2 = up(r + P.sp + P.sp2), n2 = [u2[1], -u2[0]], uh = up(r + P.sp + P.sp2 + P.nk), nh = [uh[1], -uh[0]];
+    const p0 = [0, y], c1 = [p0[0] + .3 * u1[0], p0[1] + .3 * u1[1]], c2 = [c1[0] + .22 * u2[0], c1[1] + .22 * u2[1]], hc = [c2[0] + .165 * uh[0], c2[1] + .165 * uh[1]];
+    const sp = (u, v) => u <= .3 ? [p0[0] + u * u1[0] + v * n1[0], p0[1] + u * u1[1] + v * n1[1]] : [c1[0] + (u - .3) * u2[0] + v * n2[0], c1[1] + (u - .3) * u2[1] + v * n2[1]];
+    const hp = (f, u) => [hc[0] + f * nh[0] + u * uh[0], hc[1] + f * nh[1] + u * uh[1]];
+    const St = [], J = { hc, mouth: hp(.07, -.05), cheek: hp(.06, -.01), brow: hp(.07, .04), crown: hp(0, .12), nape: hp(-.07, -.02), hat: hp(.2, .07) };
+    const bust = P.only === 'bust';
+    // legs
+    const legs = {};
+    for (const s of ['A', 'B']) {
+      const l = P['l' + s], sg = s === 'A' ? 1 : -1;
+      legs[s] = chain(sp(0, .025 * sg), l[0] - r, l[0] + l[1] - r, .44, .42);
+      legs[s].ft = l[2] || 0;
+    }
+    // arms (FK or IK)
+    const arms = {};
+    for (const s of ['A', 'B']) {
+      const sg = s === 'A' ? 1 : -1, o = sp(.455, .07 * sg);
+      let a1, a2, tg = P['r' + s];
+      if (typeof tg === 'function') tg = tg(J);
+      if (tg) {
+        const dx = tg[0] - o[0], dy = tg[1] - o[1], d = Math.min(.525, Math.max(.08, Math.hypot(dx, dy)));
+        const phi = Math.atan2(dx, -dy) / RAD, al = Math.acos((.28 * .28 + d * d - .25 * .25) / (2 * .28 * d)) / RAD, ga = Math.acos((.25 * .25 + d * d - .28 * .28) / (2 * .25 * d)) / RAD;
+        const fl = P['f' + s] ? -1 : 1;
+        a1 = phi - al * fl; a2 = phi + ga * fl;
+      } else { const a = P['a' + s]; a1 = a[0] - r; a2 = a[0] + a[1] - r; }
+      arms[s] = chain(o, a1, a2, .28, .25);
+      const e = arms[s].e, d2 = arms[s].d2;
+      J['hand' + s] = [e[0] + d2[0] * .06, e[1] + d2[1] * .06];
+    }
+    const limbZ = { A: .07, B: -.07 };
+    const armStroke = s => {
+      const a = arms[s], f = [], b = [];
+      for (const [d, w] of AW) { f.push(a.pt(d, w)); b.push(a.pt(d, -w)); }
+      const e = a.e, d2 = a.d2, q = a.q2;
+      f.push([e[0] + d2[0] * .05 + q[0] * .026, e[1] + d2[1] * .05 + q[1] * .026], [e[0] + d2[0] * .105, e[1] + d2[1] * .105], [e[0] + d2[0] * .05 - q[0] * .022, e[1] + d2[1] * .05 - q[1] * .022]);
+      St.push({ p: f.concat(b.reverse()), z: limbZ[s] });
+    };
+    const legStroke = (s, d0) => {
+      const a = legs[s], f = [], b = [];
+      for (const [d] of LW) if (d >= d0 - .001) { const w = wAt(LW, d); f.push(a.pt(d, w)); b.push(a.pt(d, -w)); }
+      if (d0 > 0 && d0 < .84 && !LW.some(v => Math.abs(v[0] - d0) < .02)) { const w = wAt(LW, d0); f.unshift(a.pt(d0, w)); b.unshift(a.pt(d0, -w)); }
+      const e = a.e, d2 = a.d2, t = dn(a.a2 + 90 + a.ft + hf);
+      const heel = [e[0] + d2[0] * .05 - t[0] * .045, e[1] + d2[1] * .05 - t[1] * .045];
+      const toe = [e[0] + d2[0] * .05 + t[0] * .17, e[1] + d2[1] * .05 + t[1] * .17];
+      f.push([e[0] + t[0] * .08 + d2[0] * .012, e[1] + t[1] * .08 + d2[1] * .012], toe, [toe[0] - t[0] * .03 + d2[0] * .018, toe[1] - t[1] * .03 + d2[1] * .018]);
+      if (P.heels) f.push([heel[0] + t[0] * .05 + d2[0] * .02, heel[1] + t[1] * .05 + d2[1] * .02], [heel[0], heel[1] - .085], heel); else f.push([heel[0] + d2[0] * .02, heel[1] + d2[1] * .02]);
+      a.low = Math.min(toe[1], heel[1] - (P.heels ? .085 : 0), toe[1] + d2[1] * .018);
+      St.push({ p: f.concat(b.reverse()), z: limbZ[s] });
+    };
+    // skirt geometry
+    const skirt = (Ln, fl, flB) => {
+      const fr = [sp(.19, .078), sp(.1, .118)], bk = [sp(.19, -.078), sp(.1, -.124)];
+      const ds = []; for (let d = .1; d < Ln - .03; d += .09) ds.push(d); ds.push(Ln);
+      for (const d of ds) {
+        const w = wAt(LW, Math.min(d, .86)), f = d / Ln, oF = w + fl * Math.pow(f, 1.3), oB = w + flB * Math.pow(f, 1.8);
+        const A = legs.A, B = legs.B, th = d <= .44, q = dn(((th ? A.a1 + B.a1 : A.a2 + B.a2) / 2) + 90);
+        const fa = A.pt(d, oF), fb = B.pt(d, oF), ba = A.pt(d, -oB), bb = B.pt(d, -oB);
+        fr.push(fa[0] * q[0] + fa[1] * q[1] > fb[0] * q[0] + fb[1] * q[1] ? fa : fb);
+        bk.push(ba[0] * q[0] + ba[1] * q[1] < bb[0] * q[0] + bb[1] * q[1] ? ba : bb);
+      }
+      const F = fr[fr.length - 1], B = bk[bk.length - 1], hem = [], hx = B[0] - F[0], hy = B[1] - F[1], hl = Math.hypot(hx, hy) || 1;
+      for (let i = 1; i < 8; i++) { const t = i / 8, o = Math.sin(t * Math.PI * 4) * .014 + Math.sin(t * Math.PI) * .02; hem.push([F[0] + hx * t + hy / hl * o, F[1] + hy * t - hx / hl * o]); }
+      St.push({ p: fr.concat(hem, bk.reverse()), z: 0 });
+    };
+    // --- head
+    { const h = []; for (let i = 0; i <= 30; i++) { const t = -Math.PI / 2 + i / 30 * TAU, s = Math.sin(t); let a = .08 * Math.cos(t), b = .105 * s; if (s < 0) { a *= 1 - .22 * Math.pow(-s, 1.5); a += .012 * -s; } a += .016 * Math.exp(-Math.pow((((t + Math.PI) % TAU) - Math.PI + .12) / .22, 2)); h.push(hp(a, b)); } St.push({ p: h, z: 0 }); }
+    // --- hair
+    if (P.hair === 'fan') {
+      for (let k = 0; k < 4; k++) St.push({ p: [hp(.05 - k * .035, .1), hp(-.05 - k * .03, .14 + .01 * k), hp(-.13 - k * .03, .2 + .035 * k), hp(-.1 - k * .055, .31 + .02 * k), hp(-.15 - k * .06, .36 + .03 * k)], z: -.02, w: .9 });
+    } else {
+      St.push({ p: [hp(.062, .085), hp(.01, .124), hp(-.07, .095), hp(-.105, .01), hp(-.11, -.09), sp(.44, -.165), sp(.34, -.16), sp(.27, -.2)], z: -.02 });
+      St.push({ p: [hp(-.02, .118), hp(-.075, .03), hp(-.08, -.1), sp(.44, -.118), sp(.35, -.125), sp(.3, -.15)], z: -.03, w: .9 });
+      if (!P.hat) St.push({ p: [hp(.0, .122), hp(.065, .09), hp(.088, .035), hp(.078, -.01)], z: .02, w: .9 });
+    }
+    if (P.hat) {
+      const b = []; for (let i = 0; i <= 20; i++) { const t = i / 20 * TAU; b.push(hp(.01 + .225 * Math.cos(t), .062 + .034 * Math.sin(t))); }
+      St.push({ p: b, z: .01 });
+      St.push({ p: [hp(-.088, .07), hp(-.08, .13), hp(-.03, .165), hp(.04, .16), hp(.085, .125), hp(.09, .07)], z: .01 });
+      J.hat = hp(.2, .07);
+    }
+    // --- torso
+    St.push({ p: [hp(.03, -.095), sp(.535, .036), sp(.5, .07), sp(.475, .125), sp(.41, .105), sp(.345, .128), sp(.28, .092), sp(.19, .076)].concat(bust ? [] : [sp(.07, .125), sp(-.02, .115)]), z: 0 });
+    St.push({ p: [hp(-.035, -.09), sp(.535, -.04), sp(.5, -.075), sp(.475, -.13), sp(.4, -.108), sp(.3, -.092), sp(.19, -.076)].concat(bust ? [] : [sp(.06, -.13), sp(-.04, -.12)]), z: 0 });
+    // --- outfit
+    const of = P.outfit; let d0 = 0;
+    if (of === 'slip') { St.push({ p: [sp(.475, .1), sp(.39, .1), sp(.34, 0), sp(.39, -.1), sp(.475, -.105)], z: .01, w: .9 }); if (!bust) { skirt(.3, .03, .04); d0 = .3; } }
+    if (of === 'day') { St.push({ p: [sp(.47, .11), sp(.435, 0), sp(.47, -.115)], z: .01, w: .9 }); if (!bust) { St.push({ p: [sp(.2, .08), sp(.185, 0), sp(.2, -.08)], z: .01, w: .9 }); skirt(.5, .13, .15); d0 = .5; } }
+    if (of === 'gown') { St.push({ p: [sp(.475, .1), sp(.4, .07), sp(.29, .005), sp(.4, -.07), sp(.475, -.105)], z: .01, w: .9 }); if (!bust) { skirt(.8, .07, .2); d0 = .8; St.push({ p: [sp(.19, -.02), legs.A.pt(.3, -.02), legs.B.pt(.62, -.12), legs.B.pt(.8, -.15)], z: -.01, w: .8 }); } }
+    if (!bust && !P.tuck) { legStroke('B', d0); legStroke('A', d0); }
+    if (!bust) armStroke('B');
+    armStroke('A');
+    J.shA = arms.A.o; J.footA = legs.A.e; J.footB = legs.B.e; J.kneeA = legs.A.k;
+    return { St, J, low: bust || P.tuck ? 0 : Math.min(legs.A.low, legs.B.low) };
+  }
+  let F = build(P.y);
+  if (P.g) F = build(P.y - F.low);
+  return F;
+}
+function addFig(P) {
+  const F = figure(P), fc = P.face || 1, px = P.px || 0, pz = P.pz || 0;
+  const map = P.map ? (x, y, z) => P.map(x - F.J.hc[0], y - F.J.hc[1], z) : (x, y, z) => [px + fc * x, y, pz + z];
+  for (const s of F.St) S(s.p.map(q => map(q[0], q[1], s.z)), { grp: P.grp, col: P.col || FIG, w: (s.w || 1) * 1.1, s: 1, a: P.a, fade: P.fade });
+  const J = {}; for (const k in F.J) J[k] = map(F.J[k][0], F.J[k][1], /A$/.test(k) ? .07 : /B$/.test(k) ? -.07 : 0);
+  return J;
+}
+const loc = (P, X, Y) => [(X - (P.px || 0)) * (P.face || 1), Y];   // scene coords -> figure-local IK target
+
+/* ---------- props ---------- */
+function bed(o) {
+  L([[-1.15, .5, -.5], [1.05, .5, -.5], [1.05, .5, .5], [-1.15, .5, .5], [-1.15, .5, -.5]], o);
+  L([[-1.15, .5, .5], [-1.15, .28, .5], [1.05, .28, .5], [1.05, .5, .5]], o);
+  C([[-1.18, 0, -.55], [-1.18, .95, -.55], [-1.18, 1.22, -.25], [-1.18, 1.26, 0], [-1.18, 1.22, .25], [-1.18, .95, .55], [-1.18, 0, .55]], o);
+  C([[1.08, 0, .52], [1.08, .62, .52], [1.08, .72, 0], [1.08, .62, -.52], [1.08, 0, -.52]], o);
+  C([[-1.08, .52, .1], [-1.05, .68, .1], [-.8, .72, .1], [-.55, .66, .1], [-.55, .52, .1]], o);
+  EXZ(-.82, .53, 0, .27, .36, o, 20);
+}
+function blanket(o) {
+  C([[-.42, .86, .3], [-.2, .8, .3], [.1, .83, .32], [.4, .78, .3], [.7, .82, .32], [.95, .74, .3], [1.06, .56, .34], [1.02, .3, .52]], o);
+  C([[-.42, .86, .3], [-.44, .6, .5], [-.38, .34, .52], [0, .3, .53], [.5, .34, .52], [1.02, .3, .52]], o);
+  C([[-.42, .86, .3], [-.4, .9, 0], [-.42, .84, -.3]], o);
+}
+function windowFrame(x0, y0, x1, y1, z, o) {
+  RXY(x0, y0, x1, y1, z, o);
+  L([[(x0 + x1) / 2, y0, z], [(x0 + x1) / 2, y1, z]], o); L([[x0, (y0 + y1) / 2, z], [x1, (y0 + y1) / 2, z]], o);
+}
+function curtain(x, y0, y1, z, sg, o) {
+  for (let k = 0; k < 3; k++) { const p = []; for (let i = 0; i <= 8; i++) { const u = i / 8; p.push([x + sg * (k * .13 + .05 * Math.sin(u * 7 + k * 2) + u * u * .12 * k), lerp(y1, y0, u), z + .05 * Math.sin(u * 5 + k)]); } C(p, o); }
+}
+function cup(x, y, z, o) {
+  C([[x - .046, y + .085, z], [x - .042, y + .03, z], [x - .022, y, z], [x + .022, y, z], [x + .042, y + .03, z], [x + .046, y + .085, z]], o);
+  EXZ(x, y + .085, z, .046, .046, o, 14);
+  C([[x + .044, y + .07, z], [x + .085, y + .065, z], [x + .08, y + .025, z], [x + .04, y + .025, z]], o);
+}
+function steam(x, y, z, o, n = 3) {
+  for (let k = 0; k < n; k++) { const p = []; for (let i = 0; i <= 10; i++) { const u = i / 10; p.push([x + (k - (n - 1) / 2) * .03 + .035 * Math.sin(u * 7 + k * 2.1) * (0.3 + u), y + u * (.42 + .1 * k), z + .03 * Math.cos(u * 6 + k)]); } C(p, Object.assign({ fx: 'steam', w: .7, a: .8 }, o)); }
+}
+function bag(h, w, ht, o, dx = 0) {
+  const x = h[0] + dx, y = h[1], z = h[2] + .03;
+  C([[x - w * .25, y - .15, z], [x - w * .14, y - .01, z], [x + w * .14, y - .01, z], [x + w * .25, y - .15, z]], o);
+  L([[x - w * .45, y - .15, z], [x + w * .45, y - .15, z], [x + w * .5, y - .15 - ht, z], [x - w * .5, y - .15 - ht, z], [x - w * .45, y - .15, z]], o);
+  L([[x + w * .45, y - .15, z], [x + w * .45, y - .15, z - .1], [x + w * .5, y - .15 - ht, z - .1], [x + w * .5, y - .15 - ht, z]], o);
+}
+function ovalOn(c, h, rx, ry, o, n = 30) { const p = []; for (let i = 0; i <= n; i++) { const t = i / n * TAU + Math.PI / 2; p.push([c[0] + h[0] * rx * Math.cos(t), c[1] + ry * Math.sin(t), c[2] + h[1] * rx * Math.cos(t)]); } S(p, o); }
+function dressShape(x, y, z, o, long) {
+  const b = long ? 1.05 : .7;
+  C([[x, y, z], [x - .12, y - .05, z], [x - .1, y - .2, z], [x - .07, y - .32, z], [x - (long ? .2 : .22), y - b, z], [x, y - b - .03, z], [x + (long ? .2 : .22), y - b, z], [x + .07, y - .32, z], [x + .1, y - .2, z], [x + .12, y - .05, z], [x, y, z]], o);
+}
+function hanger(x, y, z, o) { C([[x + .02, y + .1, z], [x + .03, y + .15, z], [x - .02, y + .15, z], [x, y + .08, z], [x, y + .04, z]], o); L([[x, y + .04, z], [x - .14, y - .02, z], [x + .14, y - .02, z], [x, y + .04, z]], o); }
+function streetlight(x, z, o, warm) {
+  C([[x, 0, z], [x, 2.6, z], [x + .04, 3.0, z + .1], [x + .22, 3.22, z + .35], [x + .45, 3.2, z + .6]], o);
+  EXZ(x, .02, z, .12, .12, o, 12);
+  C([[x + .33, 3.18, z + .5], [x + .45, 3.05, z + .62], [x + .6, 3.16, z + .74], [x + .33, 3.18, z + .5]], warm);
+  const lx = x + .46, lz = z + .62;
+  for (const a of [0, 120, 240]) L([[lx, 3.05, lz], [lx + 1.05 * Math.cos(a * RAD), .01, lz + 1.05 * Math.sin(a * RAD)]], Object.assign({}, warm, { a: .16, w: .7 }));
+  EXZ(lx, .01, lz, 1.05, 1.05, Object.assign({}, warm, { a: .5 }), 34);
+  EXY(lx, 3.07, lz, .11, .11, Object.assign({}, warm, { fx: 'tw' }), 0, 360, 14);
+}
+
+/* ================= THE DAY ================= */
+const dim = { a: .5, w: .8 };
+// 1 — Morning
+SC = SCN[0];
+{
+  bed();
+  addFig({ grp: 'f1', px: 0, y: .63, g: 0, rot: -90, nk: 6, tuck: 1, hair: 'fan', aA: [3, 6], aB: [-3, 5], lA: [3, -4, 20], lB: [-2, -2, 20] });
+  blanket({ grp: 'f1', col: SC.col });
+  windowFrame(-.1, 1.05, 1.5, 2.45, -1.7, dim);
+  EXY(.95, 1.5, -2.4, .3, .3, { col: [255, 214, 140] });
+  for (let k = 0; k < 9; k++) { const a = (k * 40 + 10) * RAD; L([[.95 + .4 * Math.cos(a), 1.5 + .4 * Math.sin(a), -2.4], [.95 + .62 * Math.cos(a), 1.5 + .62 * Math.sin(a), -2.4]], { col: [255, 214, 140], a: .7, fx: 'tw' }); }
+  curtain(-.2, 1.0, 2.55, -1.6, -1, dim); curtain(1.6, 1.0, 2.55, -1.6, 1, dim);
+  addFig({ grp: 'f2', px: -.2, y: .6, g: 0, sp: -7, sp2: -4, nk: -14, aA: [168, 14], aB: [146, 30], lA: [86, -3, 25], lB: [80, -8, 25] });
+  C([[-.05, .62, .3], [.3, .7, .32], [.7, .72, .3], [1.0, .6, .34], [1.02, .3, .52]], { grp: 'f2', col: SC.col });
+  addFig({ grp: 'f3', px: 1.75, aA: [10, 14], aB: [-14, 8], lA: [5, -3, 0], lB: [-5, -2, 0] });
+}
+// 2 — Shower
+SC = SCN[1];
+{
+  C([[-.8, 0, -.25], [-.8, 2.2, -.25], [-.72, 2.36, -.22], [-.3, 2.38, -.1], [0, 2.34, 0], [.02, 2.24, 0]], {});
+  EXZ(.02, 2.22, 0, .2, .2, {}, 22); EXZ(.02, 2.25, 0, .07, .07, {}, 12);
+  const P1 = { grp: 'f1', px: .05, outfit: 'none', sp: -3, nk: -16, lA: [6, -6, 0], lB: [-3, 0, 0], rA: J => [J.crown[0] - .01, J.crown[1] + .01], rB: J => [J.nape[0] - .03, J.nape[1] + .06] };
+  const water = (k0, k1) => { for (let k = k0; k < k1; k++) { const a = k * 2.4, r = .05 + .13 * ((k * 7) % 10) / 10, x0 = .02 + r * Math.cos(a), z0 = r * Math.sin(a), sx = 1 + 1.6 * (r / .18), p = []; for (let i = 0; i <= 8; i++) { const u = i / 8; p.push([.02 + (x0 - .02) * lerp(1, sx + 1.2, u * u), 2.2 - 2.19 * u, z0 * lerp(1, sx + 1.2, u * u)]); } C(p, { fx: 'water', w: .6, a: .5 }); } };
+  water(0, 7);
+  addFig(P1);
+  water(7, 12);
+  addFig({ grp: 'f2', px: .05, outfit: 'none', sp: -2, nk: -22, lA: [3, -2, 0], lB: [-6, -4, 0], aA: [128, 28], rB: () => [.2, 1.22] });
+  water(12, 17);
+  for (const r of [.35, .62, .92]) EXZ(.05, .006, 0, r, r * .9, { a: .7 - r * .4, fx: 'tw' }, 34);
+  RXY(-1.0, 0, 1.1, 2.15, .85, { a: .22, w: .7 });
+}
+// 3 — Coffee
+SC = SCN[2];
+{
+  const o = {};
+  for (const z of [.2, -.2]) L([[-.3, 0, z], [-.3, .46, z], [-.74, .46, z], [-.74, 0, z], [-.74, .46, z], [-.82, 1.04, z]], o);
+  L([[-.82, 1.04, .2], [-.82, 1.04, -.2]], o); L([[-.8, .8, .2], [-.8, .8, -.2]], o); L([[-.3, .46, .2], [-.3, .46, -.2]], o);
+  EXZ(.38, .74, 0, .42, .42, o, 34); C([[.38, .74, 0], [.36, .4, 0], [.38, .03, 0]], o); EXZ(.38, .02, 0, .24, .24, o, 22);
+  const base = { px: -.52, y: .56, g: 0, sp: 9, sp2: 4, lA: [88, -86, 0], lB: [80, -74, 0] };
+  EXZ(.1, .745, .02, .085, .085, o, 16);
+  cup(.1, .75, .02, { grp: 'f1', col: [255, 226, 190] }); steam(.1, .85, .02, { grp: 'f1' });
+  addFig(Object.assign({ grp: 'f1', rA: () => [.56, .8], aB: [30, 60] }, base));
+  L([[.38, 3.4, 0], [.38, 2.2, 0]], dim);
+  C([[.38, 2.2, 0], [.2, 2.05, 0], [.08, 1.86, 0]], o); C([[.38, 2.2, 0], [.56, 2.05, 0], [.68, 1.86, 0]], o); EXZ(.38, 1.86, 0, .3, .3, o, 24);
+  for (const a of [20, 140, 260]) L([[.38, 1.86, 0], [.38 + .55 * Math.cos(a * RAD), .76, .55 * Math.sin(a * RAD)]], { a: .14, w: .7 });
+  const J = addFig(Object.assign({ grp: 'f2', nk: -8, rA: j => [j.mouth[0] + .1, j.mouth[1] - .04], aB: [34, 50] }, base));
+  cup(J.handA[0] + .02, J.handA[1] - .03, .09, { grp: 'f2', col: [255, 226, 190] }); steam(J.handA[0] + .02, J.handA[1] + .06, .09, { grp: 'f2' }, 4);
+  // little vase with a flower
+  C([[.6, .74, -.12], [.56, .8, -.12], [.59, .9, -.12], [.61, .9, -.12], [.64, .8, -.12], [.6, .74, -.12]], o);
+  C([[.6, .9, -.12], [.62, 1.05, -.12], [.58, 1.18, -.12]], o); for (let k = 0; k < 5; k++) { const a = k * 72 * RAD; C([[.58, 1.18, -.12], [.58 + .07 * Math.cos(a - .4), 1.18 + .07 * Math.sin(a - .4), -.12], [.58 + .09 * Math.cos(a), 1.18 + .09 * Math.sin(a), -.12], [.58 + .07 * Math.cos(a + .4), 1.18 + .07 * Math.sin(a + .4), -.12], [.58, 1.18, -.12]], { w: .7 }); }
+}
+// 4 — Makeup
+SC = SCN[3];
+{
+  const o = {}, h = [.66, .75], mc = [1.0, 1.42, -.05];
+  L([[.2, .76, -.36], [1.2, .76, -.36], [1.2, .76, .36], [.2, .76, .36], [.2, .76, -.36]], o);
+  for (const [x, z] of [[.22, .34], [1.18, .34], [1.18, -.34], [.22, -.34]]) L([[x, .76, z], [x, 0, z]], o);
+  L([[.2, .62, .36], [1.2, .62, .36]], o);
+  EXZ(-.38, .48, 0, .2, .2, o, 20); for (const a of [30, 150, 270]) L([[-.38 + .15 * Math.cos(a * RAD), .48, .15 * Math.sin(a * RAD)], [-.38 + .22 * Math.cos(a * RAD), 0, .22 * Math.sin(a * RAD)]], o);
+  ovalOn(mc, h, .36, .5, o); ovalOn(mc, h, .32, .46, { a: .5, w: .7 });
+  L([[mc[0], .92, mc[2]], [mc[0], .76, mc[2]]], o);
+  const base = { px: -.38, y: .58, g: 0, sp: 8, sp2: 3, lA: [88, -84, 0], lB: [78, -72, 0] };
+  const P1 = Object.assign({ grp: 'f1', nk: -4, rA: j => [j.cheek[0] + .13, j.cheek[1] - .02], rB: () => [.62, .82] }, base);
+  const J1 = addFig(P1);
+  L([[J1.handA[0], J1.handA[1], .07], [J1.cheek[0] + .02, J1.cheek[1], .05]], { grp: 'f1', col: SC.col });
+  const refl = (x, y) => [mc[0] + h[0] * -x * .8, mc[1] - .02 + y * .8, mc[2] + h[1] * -x * .8];
+  addFig(Object.assign({}, P1, { grp: 'f1', only: 'bust', map: refl, a: .7, col: [255, 196, 214], rB: null, aB: [0, 0] }));
+  for (let k = 0; k < 10; k++) { const t = k / 10 * TAU + .3; ovalOn([mc[0] + h[0] * .44 * Math.cos(t), mc[1] + .58 * Math.sin(t), mc[2] + h[1] * .44 * Math.cos(t)], h, .04, .04, { col: [255, 226, 180], fx: 'tw', w: .8, step: .012 }, 12); }
+  // products
+  L([[.42, .76, .16], [.42, .86, .16], [.46, .86, .16], [.46, .76, .16], [.46, .86, .16], [.455, .92, .16], [.425, .9, .16], [.425, .86, .16]], o);
+  C([[.6, .76, -.1], [.56, .78, -.1], [.56, .88, -.1], [.6, .9, -.1], [.64, .88, -.1], [.64, .78, -.1], [.6, .76, -.1]], o); L([[.6, .9, -.1], [.6, .94, -.1]], o); EXY(.6, .965, -.1, .03, .03, o, 0, 360, 10);
+  L([[.76, .76, .2], [.75, .88, .2], [.85, .88, .2], [.84, .76, .2]], o); for (const dx of [-.03, 0, .035]) C([[.8, .86, .2], [.8 + dx, 1.0, .2], [.8 + dx * 1.6, 1.08, .2]], { w: .7 });
+  EXZ(.36, .765, -.18, .07, .07, o, 14);
+  const P2 = Object.assign({ grp: 'f2', nk: 5, rA: j => [j.mouth[0] + .11, j.mouth[1] - .01], rB: j => [j.crown[0] - .06, j.crown[1] - .02] }, base);
+  const J2 = addFig(P2);
+  L([[J2.handA[0], J2.handA[1], .07], [J2.mouth[0] + .015, J2.mouth[1], .05]], { grp: 'f2', col: SC.col });
+  addFig(Object.assign({}, P2, { grp: 'f2', only: 'bust', map: refl, a: .7, col: [255, 196, 214], rB: null, aB: [0, 0] }));
+}
+// 5 — Getting dressed
+SC = SCN[4];
+{
+  const o = {};
+  C([[-1.75, 0, -.5], [-1.75, 1.7, -.5], [-1.7, 1.78, -.5], [-.35, 1.78, -.5], [-.3, 1.7, -.5], [-.3, 0, -.5]], o);
+  L([[-1.75, 0, -.75], [-1.75, 0, -.25]], o); L([[-.3, 0, -.75], [-.3, 0, -.25]], o);
+  hanger(-1.45, 1.66, -.5, o); dressShape(-1.45, 1.62, -.5, { a: .75 }, 1);
+  hanger(-1.0, 1.66, -.5, o); dressShape(-1.0, 1.62, -.5, { a: .75 }, 0);
+  hanger(-.58, 1.66, -.5, o);
+  addFig({ grp: 'f1', px: -.25, pz: .1, face: -1, sp: 4, rA: () => [.36, 1.6], aB: [-12, 14], lA: [8, -4, 0], lB: [-10, -3, 0] });
+  const h = [.55, .84], mc = [1.55, 1.0, -.3];
+  ovalOn(mc, h, .34, .86, o, 36); L([[mc[0] - h[0] * .34, 1.0, mc[2] - h[1] * .34], [mc[0] - h[0] * .44, 0, mc[2] - h[1] * .44 + .25]], o); L([[mc[0] + h[0] * .34, 1.0, mc[2] + h[1] * .34], [mc[0] + h[0] * .44, 0, mc[2] + h[1] * .44 + .25]], o);
+  helix(.55, .1, {});
+  const P2 = { grp: 'f2', px: .55, pz: .1, outfit: 'day', hat: 1, heels: 1, sp: -2, nk: -3, rA: j => [j.hat[0] - .02, j.hat[1] - .02], aB: [-16, 12], lA: [9, -5, 0], lB: [-7, -2, 0] };
+  const J = addFig(P2);
+  bag(J.handB, .24, .2, { grp: 'f2' });
+  for (const [x, y, z] of [[1.1, 2.3, .3], [.1, 2.45, -.2], [1.25, 1.9, .5], [-.05, 2.1, .4]]) star(x, y, z, .05, { life: 2, fade: 3 });
+}
+// 6 — Shopping
+SC = SCN[5];
+{
+  const zb = -1.7, bagc = [[255, 150, 190], [150, 220, 255], [255, 214, 130]];
+  const shop = (x0, x1, ht, kind) => {
+    const o = {}, w = x1 - x0;
+    L([[x0, 0, zb], [x0, ht, zb], [x1, ht, zb], [x1, 0, zb]], o);
+    const aw = [[x0, 2.35, zb]]; const n = 6; for (let i = 0; i <= n; i++) { const x = x0 + w * i / n; aw.push([x, 2.05, zb + .55]); if (i < n) aw.push([x + w / n / 2, 1.93, zb + .55]); } aw.push([x1, 2.35, zb]);
+    L([[x0, 2.35, zb], [x1, 2.35, zb]], o); C(aw.slice(1, -1), o); L([[x0, 2.35, zb], [x0, 2.05, zb + .55]], o); L([[x1, 2.35, zb], [x1, 2.05, zb + .55]], o);
+    RXY(x0 + .2, .35, x0 + w * .6, 1.85, zb, o); RXY(x0 + w * .68, 0, x1 - .2, 1.85, zb, o);
+    EXY(x0 + w * .68 + .1, .95, zb, .035, .035, o, 0, 360, 8);
+    const cx = x0 + .2 + (w * .6 - .2) / 2, d = { a: .8, w: .8 };
+    if (kind === 0) { EXY(cx, 1.62, zb - .25, .07, .09, d, 0, 360, 12); dressShape(cx, 1.5, zb - .25, d, 0); L([[cx, .78, zb - .25], [cx, .4, zb - .25]], d); }
+    if (kind === 1) { bag([cx - .25, 1.2, zb - .28], .34, .3, d); C([[cx + .15, .5, zb - .25], [cx + .2, .68, zb - .25], [cx + .32, .58, zb - .25], [cx + .5, .52, zb - .25], [cx + .5, .47, zb - .25], [cx + .15, .47, zb - .25], [cx + .15, .5, zb - .25]], d); }
+    if (kind === 2) { EXY(cx - .2, 1.3, zb - .25, .26, .04, d, 0, 360, 16); C([[cx - .32, 1.31, zb - .25], [cx - .3, 1.45, zb - .25], [cx - .2, 1.5, zb - .25], [cx - .1, 1.45, zb - .25], [cx - .08, 1.31, zb - .25]], d); L([[cx - .2, 1.26, zb - .25], [cx - .2, .4, zb - .25]], d); dressShape(cx + .35, 1.5, zb - .25, d, 1); }
+    for (let k = 0; k < 3; k++) RXY(x0 + .25 + k * (w - .5) / 3 + .1, ht - .75, x0 + .25 + (k + 1) * (w - .5) / 3 - .1, ht - .2, zb, { a: .45, w: .7 });
+  };
+  const walker = (k, x, ph) => {
+    const A = ph ? { lA: [26, -8, 6], lB: [-20, -36, -8], aA: [-12, 10], aB: [16, 18] } : { lA: [-20, -36, -8], lB: [26, -8, 6], aA: [16, 18], aB: [-12, 10] };
+    const J = addFig(Object.assign({ grp: 'f' + k, px: x, pz: .15, outfit: 'day', hat: 1, heels: 1, sp: 3, fade: 6 }, A));
+    bag(J.handA, .26, .24, { grp: 'f' + k, col: bagc[0], fade: 6 });
+    if (k > 1) bag(J.handB, .22, .3, { grp: 'f' + k, col: bagc[1], fade: 6 });
+    if (k > 2) bag(J.handA, .2, .18, { grp: 'f' + k, col: bagc[2], fade: 6 }, .13);
+  };
+  L([[-5.2, 0, 1.0], [5.2, 0, 1.0]], { a: .3, w: .7 });
+  shop(-4.7, -1.75, 2.9, 0); walker(1, -3.1, 0);
+  C([[-1.57, 0, -1.2], [-1.55, .8, -1.2], [-1.58, 1.5, -1.2]], dim); EXY(-1.58, 1.95, -1.2, .4, .5, dim, -90, 270, 20);
+  shop(-1.4, 1.4, 3.2, 1); walker(2, -.1, 1);
+  C([[1.6, 0, -1.2], [1.62, .8, -1.2], [1.59, 1.5, -1.2]], dim); EXY(1.59, 1.95, -1.2, .4, .5, dim, -90, 270, 20);
+  shop(1.8, 4.7, 2.8, 2); walker(3, 3.0, 0);
+}
+// 7 — Changing clothes
+SC = SCN[6];
+{
+  const o = {};
+  // folding screen
+  const sx = [[-1.5, -.2], [-.9, -.75], [-.3, -.2], [.3, -.75]];
+  for (let k = 0; k < 3; k++) { const a = sx[k], b = sx[k + 1]; L([[a[0], .08, a[1]], [a[0], 1.9, a[1]], [b[0], 1.9, b[1]], [b[0], .08, b[1]], [a[0], .08, a[1]]], o); C([[a[0], 1.9, a[1]], [(a[0] + b[0]) / 2, 2.05, (a[1] + b[1]) / 2], [b[0], 1.9, b[1]]], { a: .6, w: .7 }); }
+  const J1 = addFig({ grp: 'f1', px: -.45, pz: .15, outfit: 'day', heels: 1, sp: 2, rA: j => [j.crown[0] + .03, j.crown[1] + .02], aB: [-14, 10], lA: [6, -3, 0], lB: [-8, -3, 0] });
+  bag([-1.25, .62, .6], .28, .26, { col: [255, 150, 190] }); bag([-1.0, .56, .75], .22, .3, { col: [150, 220, 255] });
+  // floor lamp
+  L([[1.75, 0, -.3], [1.75, 1.6, -.3]], o); EXZ(1.75, .01, -.3, .17, .17, o, 14); EXZ(1.75, 1.6, -.3, .26, .26, o, 18); EXZ(1.75, 1.95, -.3, .15, .15, o, 14);
+  for (const a of [0, 90, 180, 270]) L([[1.75 + .26 * Math.cos(a * RAD), 1.6, -.3 + .26 * Math.sin(a * RAD)], [1.75 + .15 * Math.cos(a * RAD), 1.95, -.3 + .15 * Math.sin(a * RAD)]], o);
+  helix(.7, .15, {});
+  const J = addFig({ grp: 'f2', px: .7, pz: .15, outfit: 'gown', heels: 1, sp: -3, sp2: -2, nk: -4, rA: () => [.1, 1.34], aB: [-20, 14], lA: [10, -8, 0], lB: [-5, -1, 0] });
+  L([[J.handB[0] - .11, J.handB[1] - .02, -.04], [J.handB[0] + .11, J.handB[1] - .02, -.04], [J.handB[0] + .11, J.handB[1] - .12, -.04], [J.handB[0] - .11, J.handB[1] - .12, -.04], [J.handB[0] - .11, J.handB[1] - .02, -.04]], { grp: 'f2' });
+  for (const [x, y, z] of [[1.25, 2.3, .4], [.2, 2.5, -.1], [1.35, 1.8, .6], [.15, 2.0, .5], [.75, 2.6, .2]]) star(x, y, z, .05, { life: 2, fade: 3 });
+}
+// 8 — Evening walk
+SC = SCN[7];
+{
+  const warm = { col: [255, 178, 96] }, win = { col: [255, 196, 120], a: .75, w: .7, fx: 'tw' }, zb = -4.2;
+  const sky = (x0, x1) => {
+    const p = [[x0, 0, zb]]; let x = x0; const b = [];
+    while (x < x1 - .5) { const w = .9 + rnd() * 1.1, h = 2.2 + rnd() * 2.9; p.push([x, h, zb], [x + w, h, zb]); b.push([x, w, h]); x += w; }
+    p.push([x, 0, zb]); L(p, { a: .55 });
+    for (const [bx, w, h] of b) for (let k = 0; k < 3; k++) if (rnd() < .7) { const wx = bx + .15 + rnd() * (w - .5), wy = .6 + rnd() * (h - 1.1); RXY(wx, wy, wx + .16, wy + .22, zb, win); }
+  };
+  const walker = (k, x, ph) => {
+    const A = ph ? { lA: [22, -6, 6], lB: [-17, -30, -8], aA: [-18, 10], aB: [20, 20] } : { lA: [-17, -30, -8], lB: [22, -6, 6], aA: [20, 20], aB: [-18, 10] };
+    addFig(Object.assign({ grp: 'f' + k, px: x, pz: .3, outfit: 'gown', heels: 1, sp: 2, nk: -5, fade: 7 }, A));
+  };
+  L([[-6.6, 1.0, -1.5], [6.6, 1.0, -1.5]], { a: .4, w: .7 }); L([[-6.6, .0, 1.3], [6.6, .0, 1.3]], { a: .25, w: .7 });
+  sky(-7.5, -2.6);
+  streetlight(-5.2, -1.0, {}, warm);
+  walker(1, -4.2, 1);
+  for (let x = -6; x <= -1; x += 1) L([[x, 1.0, -1.5], [x, 0, -1.5]], { a: .35, w: .7 });
+  sky(-2.6, 2.4);
+  streetlight(-.9, -1.0, {}, warm);
+  walker(2, -.2, 0);
+  crescent(2.6, 5.9, -5.5, .5, { col: [226, 230, 255] });
+  for (const [x, y] of [[.6, 6.3], [1.5, 5.5], [3.9, 6.5], [4.6, 5.6], [-.9, 5.9], [5.8, 6.2], [-3.4, 6.3], [-5, 5.6]]) star(x, y, -5.5, .07, { col: [226, 230, 255] });
+  for (let x = 0; x <= 6; x += 1) L([[x, 1.0, -1.5], [x, 0, -1.5]], { a: .35, w: .7 });
+  sky(2.4, 7.5);
+  streetlight(3.2, -1.0, {}, warm);
+  walker(3, 3.9, 1);
+}
+// 9 — Night
+SC = SCN[8];
+{
+  const o = {}, h = [.64, .77], mc = [1.05, 1.55, -.1];
+  ovalOn(mc, h, .42, .42, o, 34); ovalOn(mc, h, .38, .38, { a: .45, w: .7 }, 30);
+  EXZ(.85, .88, 0, .32, .26, o, 26); C([[.55, .88, 0], [.62, .7, 0], [.8, .62, 0], [.85, 0, 0]], o); C([[1.15, .88, 0], [1.08, .7, 0], [.9, .62, 0], [.85, 0, 0]], o);
+  C([[1.05, .88, -.12], [1.05, 1.06, -.12], [.96, 1.1, -.08], [.9, 1.02, -.05]], o);
+  const P1 = { grp: 'f1', px: .12, pz: .05, outfit: 'gown', heels: 1, sp: 6, nk: 4, rA: j => [j.cheek[0] + .1, j.cheek[1] - .01], rB: () => [.5, .92], lA: [6, -4, 0], lB: [-6, -2, 0] };
+  const J1 = addFig(P1);
+  EXY(J1.handA[0] + .02, J1.handA[1] + .03, .1, .04, .04, { grp: 'f1', col: SC.col }, 0, 360, 10);
+  const refl = (x, y) => [mc[0] + h[0] * -x * .75, mc[1] - .03 + y * .75, mc[2] + h[1] * -x * .75];
+  addFig(Object.assign({}, P1, { grp: 'f1', only: 'bust', map: refl, a: .65, col: [214, 200, 255], rB: null, aB: [0, 0] }));
+  // candle
+  L([[1.55, .0, .5], [1.55, .5, .5]], o); EXZ(1.55, .5, .5, .1, .1, o, 12); L([[1.52, .5, .5], [1.52, .68, .5], [1.58, .68, .5], [1.58, .5, .5]], o);
+  C([[1.55, .7, .5], [1.52, .76, .5], [1.55, .86, .5], [1.58, .76, .5], [1.55, .7, .5]], { col: [255, 196, 110], fx: 'tw' });
+  windowFrame(-1.9, 1.1, -.7, 2.4, -1.5, dim); crescent(-1.25, 1.95, -2.4, .2, { col: [226, 230, 255] });
+  const P2 = { grp: 'f2', px: .12, pz: .05, outfit: 'slip', sp: -3, nk: -10, rA: j => [j.nape[0] - .04, j.nape[1] + .08], rB: j => [j.crown[0] - .02, j.crown[1] + .03], lA: [5, -3, 0], lB: [-7, -3, 0] };
+  addFig(P2);
+  addFig(Object.assign({}, P2, { grp: 'f2', only: 'bust', map: refl, a: .65, col: [214, 200, 255], rA: null, rB: null, aA: [0, 0], aB: [0, 0] }));
+}
+// 10 — Sleep
+SC = SCN[9];
+{
+  bed({ a: .85 });
+  windowFrame(-.1, 1.05, 1.5, 2.45, -1.7, dim);
+  curtain(-.2, 1.0, 2.55, -1.6, -1, dim); curtain(1.6, 1.0, 2.55, -1.6, 1, dim);
+  addFig({ grp: 'f1', px: -.25, y: .6, g: 0, sp: 10, sp2: 8, nk: 16, aA: [38, 40], aB: [30, 30], lA: [86, -3, 25], lB: [80, -8, 25] });
+  crescent(.95, 1.9, -2.6, .26, { col: [226, 230, 255] });
+  for (const [x, y] of [[.25, 2.2], [.5, 1.4], [1.3, 2.25], [1.25, 1.35], [.1, 1.7]]) star(x, y, -2.6, .045, { col: [226, 230, 255] });
+  addFig({ grp: 'f2', px: 0, y: .63, g: 0, rot: -90, nk: 10, tuck: 1, hair: 'fan', aA: [3, 6], aB: [-3, 5], lA: [4, -6, 20], lB: [-2, -2, 20], speed: .8 });
+  blanket({ grp: 'f2', col: [130, 150, 240] });
+  // the light's farewell: a slow, rising drift that leaves no lasting line
+  C([[1.02, .3, .52], [1.3, .7, .7], [.9, 1.3, .5], [.2, 1.5, .1], [-.5, 1.3, -.1], [-.8, 1.0, .0], [-.72, .88, .02]], { grp: 'out', a: 0, dur: 9 });
+}
+
+/* ---------- timeline ---------- */
+const T0 = []; let TEND = 0;
+{
+  let t = 0;
+  for (let i = 0; i < NSC; i++) {
+    T0.push(t);
+    const ls = strokes.filter(s => s.sc === i), lead = i ? 2.0 : 0;
+    let sum = 0, fixed = 0;
+    ls.forEach((s, k) => {
+      s.cost = s.len / s.speed + .04;
+      if (k) { const a = ls[k - 1], d = Math.hypot(s.p[0] - a.p[a.n * 3 - 3], s.p[1] - a.p[a.n * 3 - 2], s.p[2] - a.p[a.n * 3 - 1]); s.tc = d / 3.2 + .05; } else s.tc = 0;
+      if (s.dur) fixed += s.dur; else sum += s.cost; sum += s.tc;
+    });
+    const sc = (DUR[i] - lead - fixed) / sum;
+    ls.forEach((s, k) => { s.ta = t; t += k ? s.tc * sc : lead; s.t0 = t; t += s.dur || s.cost * sc; s.t1 = t; });
+  }
+  T0.push(t); TEND = t;
+  // lifetimes
+  for (let i = 0; i < NSC; i++) {
+    const ls = strokes.filter(s => s.sc === i), figs = [];
+    for (const s of ls) if (s.grp[0] === 'f' && !figs.includes(s.grp)) figs.push(s.grp);
+    const start = g => ls.find(s => s.grp === g).t0;
+    for (const s of ls) {
+      const last = i === NSC - 1, gi = figs.indexOf(s.grp);
+      if (s.life != null) { s.die = s.t1 + s.life; s.fade = s.fade || 3; }
+      else if (gi >= 0 && gi < figs.length - 1) { s.die = start(figs[gi + 1]) + .4; s.fade = s.fade || 3.2; }
+      else if (last) { s.die = TEND - (gi >= 0 ? 6.5 : 9); s.fade = gi >= 0 ? 8.5 : 7; }
+      else { s.die = T0[i + 1] + (gi >= 0 ? 2.2 : 1.2); s.fade = s.fade ? Math.min(s.fade, 4.5) : 4; }
+    }
+  }
+}
+const TOTAL = TEND + 4.5;
+const TA = strokes.map(s => s.ta);
+
+function penAt(t, out) {
+  if (t < 0) t = 0;
+  let lo = 0, hi = strokes.length - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (TA[m] <= t) lo = m; else hi = m - 1; }
+  const s = strokes[lo], p = s.p;
+  if (t >= s.t0) {
+    let f = (t - s.t0) / (s.t1 - s.t0); if (f > 1) f = 1;
+    const x = f * (s.n - 1), i = Math.min(s.n - 2, x | 0), u = x - i;
+    out[0] = lerp(p[i * 3], p[i * 3 + 3], u); out[1] = lerp(p[i * 3 + 1], p[i * 3 + 4], u); out[2] = lerp(p[i * 3 + 2], p[i * 3 + 5], u);
+  } else {
+    const a = strokes[lo - 1], q = a.p, n = a.n;
+    let e = (t - s.ta) / (s.t0 - s.ta); e = e * e * e * (e * (e * 6 - 15) + 10);
+    const ax = q[n * 3 - 3], ay = q[n * 3 - 2], az = q[n * 3 - 1], bx = p[0], by = p[1], bz = p[2];
+    const d = Math.hypot(bx - ax, by - ay, bz - az), m = d * .9;
+    const k = Math.min(4, n - 1), j = Math.min(4, s.n - 1);
+    let t1x = ax - q[(n - 1 - k) * 3], t1y = ay - q[(n - 1 - k) * 3 + 1], t1z = az - q[(n - 1 - k) * 3 + 2], l1 = Math.hypot(t1x, t1y, t1z) || 1;
+    let t2x = p[j * 3] - bx, t2y = p[j * 3 + 1] - by, t2z = p[j * 3 + 2] - bz, l2 = Math.hypot(t2x, t2y, t2z) || 1;
+    const e2 = e * e, e3 = e2 * e, h1 = 2 * e3 - 3 * e2 + 1, h2 = e3 - 2 * e2 + e, h3 = -2 * e3 + 3 * e2, h4 = e3 - e2;
+    const lift = Math.sin(Math.PI * e) * Math.min(1.1, d * .11);
+    out[0] = h1 * ax + h2 * m * t1x / l1 + h3 * bx + h4 * m * t2x / l2;
+    out[1] = h1 * ay + h2 * m * t1y / l1 + h3 * by + h4 * m * t2y / l2 + lift;
+    out[2] = h1 * az + h2 * m * t1z / l1 + h3 * bz + h4 * m * t2z / l2 + lift * .6;
+    if (out[1] < .03) out[1] = .03;
+  }
+  return lo;
+}
+
+/* ---------- rendering ---------- */
+const cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+const mk = () => { const c = document.createElement('canvas'); return [c, c.getContext('2d')]; };
+const [sc, g] = mk(), [rc, rg] = mk(), [b1, g1] = mk(), [b2, g2] = mk();
+let W = 0, H = 0, foc = 1, asp = 1, qual = 1, slow = 0;
+const hasFilter = typeof g.filter === 'string';
+function resize() {
+  let d = Math.min(window.devicePixelRatio || 1, 1.5);
+  const px = innerWidth * innerHeight * d * d; if (px > 2.4e6) d *= Math.sqrt(2.4e6 / px);
+  d *= qual;
+  W = Math.max(2, Math.round(innerWidth * d)); H = Math.max(2, Math.round(innerHeight * d));
+  cv.width = sc.width = W; cv.height = sc.height = H; rc.width = W >> 1; rc.height = H >> 1;
+  b1.width = W >> 2; b1.height = H >> 2; b2.width = W >> 4; b2.height = H >> 4;
+  asp = W / H; foc = 1.25 * H * Math.min(1, asp / 1.25);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+}
+addEventListener('resize', resize); resize();
+// glow sprites
+const [spr, sg2] = mk(); spr.width = spr.height = 128;
+{ const gr = sg2.createRadialGradient(64, 64, 0, 64, 64, 64); gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(.08, 'rgba(255,250,240,.85)'); gr.addColorStop(.25, 'rgba(255,230,200,.22)'); gr.addColorStop(.6, 'rgba(255,220,190,.04)'); gr.addColorStop(1, 'rgba(255,220,190,0)'); sg2.fillStyle = gr; sg2.fillRect(0, 0, 128, 128); }
+
+const cam = { x: 0, y: 0, z: 0, rx: 1, rz: 0, ux: 0, uy: 1, uz: 0, fx: 0, fy: 0, fz: -1 };
+const tmp = [0, 0, 0], pen = [0, 0, 0];
+function sceneCam(i) {
+  const s = SCN[i], c = CAMS[i], w = toWorld(s, [c[0], c[1], c[2]]);
+  return { x: w[0], y: w[1], z: w[2], d: c[3], a: c[4] * RAD + s.yaw, f: c[5] };
+}
+const SCAM = SCN.map((_, i) => sceneCam(i));
+function setCam(t) {
+  let i = 0; while (i < NSC - 1 && t >= T0[i + 1] - .6) i++;
+  let A = SCAM[i], k = 0, B = A;
+  if (i > 0) { k = sm((t - (T0[i] - .6)) / 4.4); B = A; A = SCAM[i - 1]; } else k = 1;
+  const tx = lerp(A.x, B.x, k), ty = lerp(A.y, B.y, k), tz = lerp(A.z, B.z, k), f = lerp(A.f, B.f, k);
+  let d = lerp(A.d, B.d, k) * .78 * Math.max(1, 1.15 / asp) * (1 + .035 * Math.sin(t * .21)), a = lerp(A.a, B.a, k) + .2 * Math.sin(t * .11 + 1) + .06 * Math.sin(t * .29);
+  // smoothed pen (deterministic low-pass)
+  let sx = 0, sy = 0, sz = 0; const N = 10;
+  for (let j = 0; j < N; j++) { penAt(t - j * .28, tmp); sx += tmp[0]; sy += tmp[1]; sz += tmp[2]; }
+  sx /= N; sy /= N; sz /= N;
+  const ff = Math.max(f, Math.sin(Math.PI * k) * .55);
+  let cx = lerp(tx, sx, ff), cy = lerp(ty, sy, .12) - .22, cz = lerp(tz, sz, ff * .5);
+  const out = sm((t - (TEND - 9)) / 12); d *= 1 + out * .35; cy += out * .25;
+  cam.x = cx + d * Math.sin(a); cam.z = cz + d * Math.cos(a); cam.y = cy + .75 + .12 * Math.sin(t * .17);
+  let fx = cx - cam.x, fy = cy - cam.y, fz = cz - cam.z; const fl = Math.hypot(fx, fy, fz); fx /= fl; fy /= fl; fz /= fl;
+  let rx = -fz, rz = fx; const rl = Math.hypot(rx, rz); rx /= rl; rz /= rl;      // right = f × up(0,1,0) → (-fz,0,fx)
+  cam.fx = fx; cam.fy = fy; cam.fz = fz; cam.rx = rx; cam.rz = rz;
+  cam.ux = -rz * fy; cam.uy = rz * fx - rx * fz; cam.uz = rx * fy;                // up = r × f
+}
+const pr = [0, 0, 0];
+function proj(x, y, z) {
+  const dx = x - cam.x, dy = y - cam.y, dz = z - cam.z, zc = dx * cam.fx + dy * cam.fy + dz * cam.fz;
+  pr[2] = zc; if (zc < .35) return false;
+  pr[0] = W / 2 + foc * (dx * cam.rx + dz * cam.rz) / zc; pr[1] = H / 2 - foc * (dx * cam.ux + dy * cam.uy + dz * cam.uz) / zc;
+  return true;
+}
+const K = () => H / 900;
+function drawStroke(s, t, active) {
+  if (t < s.t0 || t > s.die + s.fade || s.a === 0) return;
+  let al = s.a * (1 - sm((t - s.die) / s.fade)); if (al < .004) return;
+  if (s.fx === 'tw') al *= .62 + .38 * Math.sin(t * 3.1 + s.ph * 40);
+  let fr = (t - s.t0) / (s.t1 - s.t0); if (fr > 1) fr = 1;
+  const m = fr >= 1 ? s.n : Math.floor(fr * (s.n - 1)) + 1, p = s.p, steamy = s.fx === 'steam';
+  const P = new Path2D(), Q = new Path2D(); let on = false, on2 = false, zs = 0, zn = 0;
+  for (let i = 0; i <= m; i++) {
+    let x, y, z;
+    if (i === m) { if (fr >= 1) break; x = pen[0]; y = pen[1]; z = pen[2]; } else { x = p[i * 3]; y = p[i * 3 + 1]; z = p[i * 3 + 2]; }
+    if (steamy) { const u = i / s.n; x += Math.sin(y * 7 + t * 1.3 + s.ph * 9) * .045 * u; y += u * .07 * Math.sin(t * .6 + s.ph * 5) + u * .05; z += Math.cos(y * 6 + t * 1.1) * .03 * u; }
+    if (proj(x, y, z)) { on ? P.lineTo(pr[0], pr[1]) : P.moveTo(pr[0], pr[1]); on = true; zs += pr[2]; zn++; } else on = false;
+    if (proj(x, -y, z)) { on2 ? Q.lineTo(pr[0], pr[1]) : Q.moveTo(pr[0], pr[1]); on2 = true; } else on2 = false;
+  }
+  if (!zn) return;
+  const zc = zs / zn, k = K(), w = Math.max(.7 * k, s.w * .011 * foc / zc);
+  al *= Math.max(.25, Math.min(1, 1.35 - zc / 16));
+  const fresh = 1 - Math.min(1, Math.max(0, (t - s.t1) / 1.0));
+  const hot = active ? 1 : fresh * fresh;
+  if (s.fx === 'water') { const dsh = [16 * k, 26 * k]; g.setLineDash(dsh); g.lineDashOffset = -(t * 300 + s.ph * 200) * k; rg.setLineDash(dsh); rg.lineDashOffset = g.lineDashOffset; }
+  g.strokeStyle = s.col;
+  g.globalAlpha = al * (.05 + .018 * hot); g.lineWidth = w * 8; g.stroke(P);
+  g.globalAlpha = al * (.19 + .05 * hot); g.lineWidth = w * 2.8; g.stroke(P);
+  g.strokeStyle = s.core; g.globalAlpha = al * .92; g.lineWidth = w; g.stroke(P);
+  if (hot > .02) { g.strokeStyle = '#fff'; g.globalAlpha = al * hot * .4; g.lineWidth = w * .6; g.stroke(P); }
+  rg.strokeStyle = s.col; rg.globalAlpha = al * .11; rg.lineWidth = w * 6; rg.stroke(Q);
+  rg.strokeStyle = s.core; rg.globalAlpha = al * (.42 + .2 * hot); rg.lineWidth = w * 1.3; rg.stroke(Q);
+  if (s.fx === 'water') { g.setLineDash([]); rg.setLineDash([]); g.strokeStyle = s.col; g.globalAlpha = al * .16; g.lineWidth = w; g.stroke(P); }
+}
+// dust motes lit by the travelling light
+const DUST = []; for (let i = 0; i < 150; i++) DUST.push([rnd(), rnd(), rnd(), rnd()]);
+
+function render(t) {
+  const cur = penAt(t, pen); setCam(t);
+  const k = K(), s0 = strokes[cur];
+  const endF = 1 - sm((t - (TEND - 5.5)) / 5.5);                 // the light itself dims at the very end
+  g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1; g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  rg.setTransform(1, 0, 0, 1, 0, 0); rg.globalCompositeOperation = 'source-over'; rg.globalAlpha = 1; rg.fillStyle = '#000'; rg.fillRect(0, 0, rc.width, rc.height);
+  rg.setTransform(.5, 0, 0, .5, 0, 0);
+  g.globalCompositeOperation = rg.globalCompositeOperation = 'lighter';
+  g.lineCap = g.lineJoin = rg.lineCap = rg.lineJoin = 'round';
+  for (let i = 0; i <= cur; i++) { const s = strokes[i]; if (s.sc < s0.sc - 2) continue; drawStroke(s, t, i === cur && t < s.t1); }
+  // comet tail of the travelling point
+  g.lineCap = rg.lineCap = 'butt'; const tailT = lerp(.38, 2.2, sm((t - (TEND - 9)) / 3)), NT = 44; let px = 0, py = 0, pz = 0, ok = false, rx = 0, ry = 0, rok = false;
+  for (let j = 0; j <= NT; j++) {
+    const u = j / NT; penAt(t - u * tailT, tmp); const a = (1 - u) * (1 - u) * endF;
+    const v = proj(tmp[0], tmp[1], tmp[2]), sx = pr[0], sy = pr[1], zc = pr[2];
+    if (v && ok) { const w = Math.max(.8 * k, .02 * foc / zc); g.strokeStyle = '#fff'; g.globalAlpha = a * .9; g.lineWidth = w * (1 - u * .6); g.beginPath(); g.moveTo(px, py); g.lineTo(sx, sy); g.stroke(); g.strokeStyle = s0.col; g.globalAlpha = a * .22; g.lineWidth = w * 5; g.stroke(); }
+    px = sx; py = sy; ok = v;
+    const v2 = proj(tmp[0], -tmp[1], tmp[2]);
+    if (v2 && rok) { rg.strokeStyle = '#fff'; rg.globalAlpha = a * .5; rg.lineWidth = Math.max(.8 * k, .02 * foc / pr[2]); rg.beginPath(); rg.moveTo(rx, ry); rg.lineTo(pr[0], pr[1]); rg.stroke(); }
+    rx = pr[0]; ry = pr[1]; rok = v2;
+  }
+  // the point of light
+  let hx = -1e4, hy = 0;
+  if (proj(pen[0], pen[1], pen[2]) && endF > .002) {
+    hx = pr[0]; hy = pr[1]; const r = Math.max(20 * k, .36 * foc / pr[2]) * (1 + .08 * Math.sin(t * 23));
+    g.globalAlpha = endF; g.drawImage(spr, hx - r, hy - r, r * 2, r * 2);
+    g.globalAlpha = endF * .55; g.drawImage(spr, hx - r * 3.4, hy - r * .16, r * 6.8, r * .32);
+    const hz = g.createRadialGradient(hx, hy, 0, hx, hy, H * .5); const c = s0.rgb;
+    hz.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${.085 * endF})`); hz.addColorStop(.4, `rgba(${c[0]},${c[1]},${c[2]},${.028 * endF})`); hz.addColorStop(1, 'rgba(0,0,0,0)');
+    g.globalAlpha = 1; g.fillStyle = hz; g.fillRect(0, 0, W, H);
+    // dust
+    g.fillStyle = '#fff';
+    for (const d of DUST) {
+      const bx = 5, by = 3, x = pen[0] + (((d[0] * bx * 2 + Math.sin(t * .1 + d[3] * 9) * .3 - pen[0]) % bx + bx * 1.5) % bx - bx / 2), y = ((d[1] * by + t * .02 * (d[3] - .3)) % by + by) % by, z = pen[2] + (((d[2] * bx * 2 - pen[2]) % bx + bx * 1.5) % bx - bx / 2);
+      const dd = (x - pen[0]) ** 2 + (y - pen[1]) ** 2 + (z - pen[2]) ** 2, b = .09 / (.12 + dd) * endF;
+      if (b < .02 || !proj(x, y, z)) continue;
+      const r = Math.max(.8 * k, .008 * foc / pr[2]); g.globalAlpha = Math.min(.8, b); g.beginPath(); g.arc(pr[0], pr[1], r, 0, TAU); g.fill();
+    }
+  }
+  if (proj(pen[0], -pen[1], pen[2]) && endF > .002) { const r = Math.max(22 * k, .42 * foc / pr[2]); rg.globalAlpha = .6 * endF; rg.drawImage(spr, pr[0] - r, pr[1] - r * 1.6, r * 2, r * 3.2); }
+  // wet floor: smeared, softened reflection
+  g.globalAlpha = .5; g.drawImage(rc, 0, 0, W, H);
+  for (const [dy, a] of [[5, .22], [12, .15], [22, .1], [36, .06], [-6, .1]]) { g.globalAlpha = a; g.drawImage(rc, 0, dy * k, W, H); }
+  // bloom
+  g1.globalCompositeOperation = 'copy'; g1.drawImage(sc, 0, 0, b1.width, b1.height);
+  g2.globalCompositeOperation = 'copy'; g2.drawImage(b1, 0, 0, b2.width, b2.height);
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  if (hasFilter) g.filter = `blur(${(5 * k).toFixed(1)}px)`;
+  g.globalAlpha = .3; g.drawImage(b1, 0, 0, W, H);
+  if (hasFilter) g.filter = `blur(${(22 * k).toFixed(1)}px)`;
+  g.globalAlpha = .42; g.drawImage(b2, 0, 0, W, H);
+  if (hasFilter) g.filter = 'none';
+  // vignette
+  g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1;
+  const vg = g.createRadialGradient(W / 2, H / 2, H * .35, W / 2, H / 2, Math.hypot(W, H) * .62); vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,.78)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  if (t > TEND) { g.globalAlpha = sm((t - TEND) / 2.5); g.fillStyle = '#000'; g.fillRect(0, 0, W, H); }
+}
+
+/* ---------- clock & controls ---------- */
+const qs = new URLSearchParams(location.search);
+let T = parseFloat(qs.get('t')) || 0, last = 0, paused = false, still = qs.has('still'), hard = true;
+function present() { ctx.globalAlpha = hard ? 1 : .7; ctx.drawImage(sc, 0, 0); hard = false; }
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000 || 0); last = now;
+  if (!paused && !still) { slow = dt > .034 ? slow + 1 : Math.max(0, slow - 2); if (slow > 45 && qual > .5) { qual *= .8; slow = 0; resize(); hard = true; } }
+  if (!paused) { T += dt; if (T > TOTAL) { T = 0; hard = true; } render(T); present(); }
+  if (!still) requestAnimationFrame(frame);
+}
+const seek = t => { T = Math.max(0, Math.min(TOTAL - .01, t)); hard = true; render(T); present(); };
+window.__light = { seek, get total() { return TOTAL; }, scenes: T0, strokes: strokes.length };
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
+  else if (e.code === 'ArrowRight') seek(T + 5); else if (e.code === 'ArrowLeft') seek(T - 5);
+  else if (e.key === 'r' || e.key === 'R') seek(0);
+  else if (e.key === 'f' || e.key === 'F') { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.(); }
+});
+cv.addEventListener('click', () => { paused = !paused; });
+if (still) { render(T); present(); } else requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
