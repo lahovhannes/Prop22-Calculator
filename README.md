@@ -27,3 +27,10 @@ npm start
 ## Data (Aug 2025)
 - Prefilled city minimum wages: Berkeley $19.18, San Francisco $19.18, Los Angeles (City) $17.87, Emeryville $19.90, etc.
 - Prop 22 per‑mile default: $0.36 (editable in UI).
+
+## 3D apartment model
+
+`public/apartment-3d/` holds a standalone, walkable Three.js model of a furnished one-bedroom
+apartment built from a 2D floor plan. With the dev server running, open
+`/apartment-3d/index.html`, or open the file directly in a browser. Geometry is entered in the
+floor plan's pixel coordinates (see the notes at the top of `apartment.js`).
