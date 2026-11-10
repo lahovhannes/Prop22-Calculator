@@ -841,90 +841,110 @@
 
 
   /* ───────────────────────── guided camera walkthrough ─────────────────── */
-  // Seven key views and the path between them, in plan pixels, following the supplied route diagram.
+  // Six stops. At each one the camera pans slowly across the room (bearings in plan degrees:
+  // 0 = east, 90 = south, 180 = west, 270 = north), then eases on to the next stop.
   var STOPS = [
-    { n: 'Entry', p: [107, 471], look: [300, 471] },
-    { n: 'Kitchen', p: [205, 300], look: [330, 265] },
-    { n: 'Living', p: [600, 300], look: [800, 330] },
-    { n: 'Bedroom door', p: [465, 570], look: [700, 740] },
-    { n: 'Bedroom', p: [540, 770], look: [760, 740] },
-    { n: 'Closet side', p: [668, 905], look: [870, 800] },
-    { n: 'Bath', p: [285, 845], look: [345, 926] }
+    { n: 'Entry', p: [115, 476], pan: [-55, 25] },
+    { n: 'Kitchen', p: [480, 300], pan: [165, 285] },
+    { n: 'Living', p: [590, 200], pan: [-35, 80] },
+    { n: 'Bath', p: [340, 740], pan: [65, 185] },
+    { n: 'Bedroom door', p: [470, 570], pan: [-8, 78] },
+    { n: 'Bedroom', p: [900, 600], pan: [95, 205] }
   ];
   var VIA = [
-    [[185, 400]],
-    [[212, 395], [300, 425], [480, 415], [555, 360]],
-    [[540, 400], [445, 440], [375, 470], [362, 520], [372, 565]],
-    [[512, 625], [528, 710]],
-    [[610, 838]],
-    [[612, 840], [540, 765], [522, 650], [465, 572], [372, 575], [346, 640], [346, 725], [325, 800]]
+    [[200, 445], [330, 435], [455, 395]],
+    [[515, 235]],
+    [[590, 300], [540, 395], [445, 440], [375, 470], [350, 545], [346, 650]],
+    [[347, 660], [358, 590], [405, 572]],
+    [[560, 572], [650, 550], [735, 545], [830, 560]]
   ];
+  var D2R = Math.PI / 180;
+  function bearingYaw(deg) { return -(deg * D2R + Math.PI / 2); }
   var LEGS = VIA.map(function (via, i) {
     var pts = [STOPS[i].p].concat(via, [STOPS[i + 1].p]).map(function (q) { return new THREE.Vector3(wx(q[0]), 0, wz(q[1])); });
-    var c = new THREE.CatmullRomCurve3(pts, false, 'centripetal'); c.arcLengthDivisions = 400;
+    var c = new THREE.CatmullRomCurve3(pts, false, 'centripetal'); c.arcLengthDivisions = 600;
     return { curve: c, len: c.getLength() };
   });
-  var tour = { on: false, leg: 0, s: 0, hold: 0, phase: 'hold', started: false };
+  STOPS.forEach(function (st) { st.dur = Math.max(7, Math.abs(st.pan[1] - st.pan[0]) / 11); });   // about 11 degrees per second
+  var tour = { on: false, leg: 0, s: 0, t: 0, v: 0, yawVel: 0, phase: 'pan', started: false };
   var routeG = new THREE.Group(); routeG.visible = false; scene.add(routeG);
   (function drawRoute() {
-    var rm = new THREE.MeshBasicMaterial({ color: '#d0392b', depthTest: false, toneMapped: false });
+    var red = new THREE.MeshBasicMaterial({ color: '#d0392b', depthTest: false, toneMapped: false });
+    var blue = new THREE.MeshBasicMaterial({ color: '#2456d6', depthTest: false, toneMapped: false });
     LEGS.forEach(function (l) {
-      var tube = new THREE.Mesh(new THREE.TubeGeometry(l.curve, 90, 0.028, 5, false), rm);
+      var tube = new THREE.Mesh(new THREE.TubeGeometry(l.curve, 120, 0.028, 5, false), red);
       tube.position.y = 2.9; tube.renderOrder = 5; routeG.add(tube);
     });
     STOPS.forEach(function (st, i) {
+      var cx = wx(st.p[0]), cz = wz(st.p[1]), pts = [], k, R = 0.62;
+      for (k = 0; k <= 24; k++) { var bb = (st.pan[0] + (st.pan[1] - st.pan[0]) * k / 24) * D2R; pts.push(new THREE.Vector3(cx + Math.cos(bb) * R, 2.95, cz + Math.sin(bb) * R)); }
+      var arc = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 40, 0.022, 5, false), blue); arc.renderOrder = 5; routeG.add(arc);
+      var tip = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.17, 10), blue), e = pts[24], d = e.clone().sub(pts[22]).normalize();
+      tip.position.copy(e); tip.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d); tip.renderOrder = 5; routeG.add(tip);
       var c = cv(96, 96), g = c.getContext('2d');
       g.fillStyle = '#2e8b2e'; g.beginPath(); g.arc(48, 48, 42, 0, 6.3); g.fill(); g.lineWidth = 6; g.strokeStyle = '#fff'; g.stroke();
       g.fillStyle = '#fff'; g.font = '600 54px sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(String(i + 1), 48, 52);
       var sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, toneMapped: false }));
-      sp.scale.set(0.42, 0.42, 1); sp.position.set(wx(st.p[0]), 3, wz(st.p[1])); sp.renderOrder = 6; routeG.add(sp);
-      var a = new THREE.Vector3(wx(st.p[0]), 2.95, wz(st.p[1])), b = new THREE.Vector3(wx(st.look[0]), 2.95, wz(st.look[1])).sub(a).setLength(0.55).add(a);
-      var arrow = new THREE.Line(new THREE.BufferGeometry().setFromPoints([a, b]), new THREE.LineBasicMaterial({ color: '#2456d6', depthTest: false, toneMapped: false }));
-      arrow.renderOrder = 5; routeG.add(arrow);
+      sp.scale.set(0.42, 0.42, 1); sp.position.set(cx, 3, cz); sp.renderOrder = 6; routeG.add(sp);
     });
   })();
-  function lookYaw(st) { return Math.atan2(-(wx(st.look[0]) - wx(st.p[0])), -(wz(st.look[1]) - wz(st.p[1]))); }
-  function turnTo(target, k) {
-    var d = target - yaw; d = Math.atan2(Math.sin(d), Math.cos(d)); yaw += d * k;
+  function smooth(x) { x = Math.max(0, Math.min(1, x)); return x * x * x * (x * (x * 6 - 15) + 10); }
+  function angDiff(a, b) { var d = b - a; return Math.atan2(Math.sin(d), Math.cos(d)); }
+  function angMix(a, b, w) { return a + angDiff(a, b) * w; }
+  // Critically damped follow: the camera heading never changes speed abruptly.
+  function followYaw(target, dt) {
+    var T = 0.75, om = 2 / T, x = om * dt, ex = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+    var lim = 38 * D2R * T, ch = Math.max(-lim, Math.min(lim, -angDiff(yaw, target))), tgt = yaw - ch;   // turn rate capped near 38 deg/s
+    var tmp = (tour.yawVel + om * ch) * dt;
+    tour.yawVel = (tour.yawVel - om * tmp) * ex;
+    yaw = tgt + (ch + tmp) * ex;
   }
   var tourBtn = document.getElementById('tourBtn');
   function tourUI() {
     tourBtn.textContent = tour.on ? 'Pause tour' : (tour.started ? 'Resume tour' : 'Play tour');
     tourBtn.setAttribute('aria-pressed', tour.on ? 'true' : 'false');
     if (tour.on) {
-      var i = tour.phase === 'hold' ? tour.leg : tour.leg + 1;
-      hint.textContent = (tour.phase === 'hold' ? 'Stop ' : 'Heading to stop ') + (i + 1) + ' of ' + STOPS.length + ' · ' + STOPS[i].n + '. Drag or press a key to take over.';
+      var i = tour.phase === 'pan' ? tour.leg : tour.leg + 1;
+      hint.textContent = (tour.phase === 'pan' ? 'Stop ' : 'Moving to stop ') + (i + 1) + ' of ' + STOPS.length + ' · ' + STOPS[i].n + '. Drag or press a key to take over.';
     }
   }
-  function tourStop(i) {           // place the camera on a key view
-    var st = STOPS[i]; pos.x = wx(st.p[0]); pos.z = wz(st.p[1]); yaw = lookYaw(st); pitch = -0.05; dirty = true;
+  function panYaw(st, t) { return bearingYaw(st.pan[0] + (st.pan[1] - st.pan[0]) * smooth((t - 0.8) / st.dur)); }
+  function tourPlace() {            // put the camera back on the route at the current tour position
+    if (tour.phase === 'pan') { var st = STOPS[tour.leg]; pos.x = wx(st.p[0]); pos.z = wz(st.p[1]); yaw = panYaw(st, tour.t); }
+    else { var q = LEGS[tour.leg].curve.getPointAt(tour.s / LEGS[tour.leg].len); pos.x = q.x; pos.z = q.z; }
+    tour.v = 0; tour.yawVel = 0; tour.want = undefined; dirty = true;
+  }
+  function tourStop(i, f) {         // jump to a stop; f = 0..1 through its pan
+    tour.leg = i; tour.phase = 'pan'; tour.t = 0.8 + (f || 0) * STOPS[i].dur; tourPlace(); pitch = -0.05;
   }
   function tourPlay() {
     if (plan) setPlan(false);
-    if (!tour.started || tour.leg >= LEGS.length) { tour.leg = 0; tour.s = 0; tour.phase = 'hold'; tour.hold = 2.2; tour.started = true; tourStop(0); }
-    else if (tour.phase === 'hold') tourStop(tour.leg);
-    else { var q = LEGS[tour.leg].curve.getPointAt(tour.s / LEGS[tour.leg].len); pos.x = q.x; pos.z = q.z; }
-    tour.on = true; tourUI(); dirty = true;
+    if (!tour.started) { tour.leg = 0; tour.s = 0; tour.t = 0; tour.phase = 'pan'; tour.started = true; pitch = -0.05; }
+    tourPlace(); tour.on = true; tourUI();
   }
   function tourPause() { if (!tour.on) return; tour.on = false; setPlan(plan); tourUI(); }
   function tourStep(dt) {
-    var ease = 1 - Math.exp(-dt * 2.6);
-    pitch += (-0.05 - pitch) * ease;
-    if (tour.phase === 'hold') {
-      turnTo(lookYaw(STOPS[tour.leg]), ease);
-      tour.hold -= dt;
-      if (tour.hold <= 0) {
+    pitch += (-0.05 - pitch) * (1 - Math.exp(-dt * 2));
+    if (tour.phase === 'pan') {
+      var st = STOPS[tour.leg];
+      tour.t += dt; followYaw(panYaw(st, tour.t), dt);
+      if (tour.t > st.dur + 1.6) {
         if (tour.leg >= LEGS.length) { tour.on = false; tour.started = false; setPlan(false); tourUI(); hint.textContent = 'Tour finished. Walk around freely, or play it again.'; }
-        else { tour.phase = 'move'; tour.s = 0; tourUI(); }
+        else { tour.phase = 'move'; tour.s = 0; tour.v = 0; tourUI(); }
       }
     } else {
-      var L = LEGS[tour.leg], rem = L.len - tour.s;
-      var v = 0.95 * Math.min(1, (tour.s + 0.12) / 0.7, (rem + 0.12) / 0.7);
-      tour.s = Math.min(L.len, tour.s + v * dt);
-      var q = L.curve.getPointAt(tour.s / L.len); pos.x = q.x; pos.z = q.z;
-      if (rem < 1.0) turnTo(lookYaw(STOPS[tour.leg + 1]), ease);
-      else { var a = L.curve.getPointAt(Math.min(1, (tour.s + 0.7) / L.len)); turnTo(Math.atan2(-(a.x - q.x), -(a.z - q.z)), ease); }
-      if (tour.s >= L.len) { tour.leg++; tour.phase = 'hold'; tour.hold = 2.8; tourUI(); }
+      var L = LEGS[tour.leg], rem = L.len - tour.s, VMAX = 0.8, ACC = 0.32;
+      var lag = Math.abs(angDiff(yaw, tour.want === undefined ? yaw : tour.want));
+      var vt = Math.min(VMAX * (1 - 0.8 * smooth(lag / 1.2)), Math.sqrt(2 * ACC * Math.max(rem, 0)));   // slow for turns, brake into the stop
+      tour.v = vt > tour.v ? Math.min(vt, tour.v + ACC * dt) : Math.max(vt, tour.v - 2 * ACC * dt);
+      tour.s = Math.min(L.len, tour.s + tour.v * dt);
+      var q = L.curve.getPointAt(tour.s / L.len), a = L.curve.getPointAt(Math.min(1, (tour.s + 0.9) / L.len));
+      pos.x = q.x; pos.z = q.z;
+      var along = Math.atan2(-(a.x - q.x), -(a.z - q.z));
+      var want = angMix(bearingYaw(STOPS[tour.leg].pan[1]), along, smooth(tour.s / 1.5));
+      want = angMix(bearingYaw(STOPS[tour.leg + 1].pan[0]), want, smooth((rem - 0.15) / 1.9));
+      tour.want = want; followYaw(want, dt);
+      if (rem < 0.0006 || (rem < 0.01 && tour.v < 0.01)) { tour.leg++; tour.phase = 'pan'; tour.t = 0; tourUI(); }
     }
     dirty = true;
   }
@@ -972,7 +992,7 @@
     planBounds: function () { return { left: ortho.left, right: ortho.right, top: ortho.top, bottom: ortho.bottom }; },
     walk: function (dx, dz) { pos.x += dx; pos.z += dz; resolve(pos); dirty = true; return { x: pos.x / S + CX, y: pos.z / S + CY }; },
     render: function () { dirty = true; },
-    tourStop: function (i) { setPlan(false); tourStop(i); }, tourPlay: tourPlay, tour: tour,
+    tourStop: function (i, f) { setPlan(false); tourStop(i, f); }, tourStep: function (dt) { tourStep(dt); return { x: pos.x, z: pos.z, yaw: yaw, phase: tour.phase, leg: tour.leg, on: tour.on }; }, tourPlay: tourPlay, tour: tour,
     tourClearance: function () {            // samples of the path that come too close to anything solid
       var bad = [];
       LEGS.forEach(function (l, i) { l.curve.getSpacedPoints(200).forEach(function (q) { if (blocked(q.x, q.z)) bad.push([i + 1, Math.round(q.x / S + CX), Math.round(q.z / S + CY)]); }); });
