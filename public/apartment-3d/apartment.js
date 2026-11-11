@@ -589,13 +589,13 @@
     vase(scene, wx(800), 0.412, wz(322), 0.8, M.ceramic, 4);
     // Wall-hung media console and television on the north wall
     var m = onWall(750, 58, 0, 1);
-    B(m, 1.8, 0.34, 0.4, M.oak, 0, 0.26, 0.2); [-0.3, 0.3].forEach(function (x) { B(m, 0.004, 0.3, 0.004, M.groove, x, 0.28, 0.401); });
-    B(m, 1.7, 0.006, 0.02, M.glow, 0, 0.25, 0.06, true);
+    B(m, 1.6, 0.34, 0.4, M.oak, 0, 0.26, 0.2); [-0.27, 0.27].forEach(function (x) { B(m, 0.004, 0.3, 0.004, M.groove, x, 0.28, 0.401); });
+    B(m, 1.5, 0.006, 0.02, M.glow, 0, 0.25, 0.06, true);
     B(m, 1.24, 0.71, 0.028, M.black, 0, 1.0, 0.035); B(m, 1.21, 0.68, 0.004, M.blackGlass, 0, 1.015, 0.05);
-    books(m, -0.62, 0.6, 0.2, 0.2); vase(m, 0.66, 0.6, 0.2, 1, M.clay, 0); vase(m, 0.5, 0.6, 0.24, 0.6, M.matte, 0);
-    obsG(m, 1.8, 0.4, 0, 0.2);
+    books(m, -0.56, 0.6, 0.2, 0.2); vase(m, 0.6, 0.6, 0.2, 1, M.clay, 0); vase(m, 0.45, 0.6, 0.24, 0.6, M.matte, 0);
+    obsG(m, 1.6, 0.4, 0, 0.2);
     // Lounge chair by the window
-    var c = GP(930, 178, -Math.PI / 2 - 0.5);
+    var c = GP(915, 240, -Math.PI / 2 - 0.12);
     RB(c, 0.76, 0.26, 0.76, 0.2, M.boucle, 0, 0.1, 0); RB(c, 0.76, 0.36, 0.2, 0.09, M.boucle, 0, 0.36, -0.28);
     RB(c, 0.16, 0.2, 0.56, 0.07, M.boucle, -0.3, 0.36, 0.08); RB(c, 0.16, 0.2, 0.56, 0.07, M.boucle, 0.3, 0.36, 0.08);
     RB(c, 0.46, 0.1, 0.5, 0.1, M.boucle, 0, 0.36, 0.1);
@@ -604,7 +604,7 @@
     // Floor lamp tucked beside the sofa
     var fl = GP(912, 448, 0); C(fl, 0.14, 0.14, 0.02, M.black, 0, 0, 0, 24); C(fl, 0.009, 0.009, 1.38, M.black, 0, 0.02, 0, 8);
     lampShade(fl, 0.19, 0.26, 0, 1.36, 0, 26, 5.5); obsG(fl, 0.2, 0.2);
-    plant(566, 455, 1.25, 1.15); plant(965, 76, 0.75, 0.9);
+    plant(566, 455, 1.25, 1.15); plant(973, 72, 0.75, 0.9);
     art(onWall(750, 491, 0, -1), 1.45, 0.95, 1.2, 0);
     curtain(984, 62, 984, 96, 4); curtain(984, 250, 984, 276, 3);
     pointLight(755, 265, 2.42, 70, 8, true);
@@ -841,20 +841,18 @@
 
 
   /* ───────────────────────── guided camera walkthrough ─────────────────── */
-  // Six stops. At each one the camera pans slowly across the room (bearings in plan degrees:
+  // Five stops. At each one the camera pans slowly across the room (bearings in plan degrees:
   // 0 = east, 90 = south, 180 = west, 270 = north), then eases on to the next stop.
   var STOPS = [
     { n: 'Entry', p: [115, 476], pan: [-55, 25] },
-    { n: 'Kitchen', p: [480, 300], pan: [165, 285] },
-    { n: 'Living', p: [590, 200], pan: [-35, 80] },
+    { n: 'Living', p: [950, 120], pan: [100, 200] },
     { n: 'Bath', p: [340, 740], pan: [65, 185] },
     { n: 'Bedroom door', p: [470, 570], pan: [-8, 78] },
     { n: 'Bedroom', p: [900, 600], pan: [95, 205] }
   ];
   var VIA = [
-    [[200, 445], [330, 435], [455, 395]],
-    [[515, 235]],
-    [[590, 300], [540, 395], [445, 440], [375, 470], [350, 545], [346, 650]],
+    [[200, 445], [330, 435], [480, 415], [565, 345], [625, 235], [700, 180], [800, 165], [885, 145]],
+    [[885, 143], [800, 158], [700, 180], [625, 245], [570, 350], [540, 400], [445, 440], [375, 470], [350, 545], [346, 650]],
     [[347, 660], [358, 590], [405, 572]],
     [[560, 572], [650, 550], [735, 545], [830, 560]]
   ];
