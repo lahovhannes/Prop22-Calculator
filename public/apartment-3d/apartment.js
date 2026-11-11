@@ -990,6 +990,7 @@
     planBounds: function () { return { left: ortho.left, right: ortho.right, top: ortho.top, bottom: ortho.bottom }; },
     walk: function (dx, dz) { pos.x += dx; pos.z += dz; resolve(pos); dirty = true; return { x: pos.x / S + CX, y: pos.z / S + CY }; },
     render: function () { dirty = true; },
+    draw: function () { cam.position.set(pos.x, EYE, pos.z); cam.rotation.set(pitch, yaw, 0); renderer.render(scene, cam); },
     tourStop: function (i, f) { setPlan(false); tourStop(i, f); }, tourStep: function (dt) { tourStep(dt); return { x: pos.x, z: pos.z, yaw: yaw, phase: tour.phase, leg: tour.leg, on: tour.on }; }, tourPlay: tourPlay, tour: tour,
     tourClearance: function () {            // samples of the path that come too close to anything solid
       var bad = [];
